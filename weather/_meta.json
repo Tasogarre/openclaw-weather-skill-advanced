@@ -1,0 +1,8 @@
+{
+  "ownerId": "lucca",
+  "slug": "weather",
+  "version": "1.2.0",
+  "publishedAt": "2026-04-27T02:00:00Z",
+  "phase": 2,
+  "phase_scope": "Advice engine (umbrella/jacket/sunglasses/wind/heat/cold rules), intent classifier (Gemma4 e4b + deterministic fallback), chat formatter (emoji), briefing formatter (compact), skill entry point, morning briefing integration."
+}
