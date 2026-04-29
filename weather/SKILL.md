@@ -61,6 +61,28 @@ User query
 
 Weather alerts are only populated when using OpenWeatherMap — `alerts` is an empty list with Open-Meteo.
 
+## Commute Windows
+
+Commute windows are defined in `location_registry.json` under `commute_windows` and
+also have programmatic defaults in `weather_engine.py`. They can be overridden at
+runtime via environment variables without editing the JSON file:
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `WEATHER_COMMUTE_MORNING_START` | `08:30` | Morning commute window start (HH:MM) |
+| `WEATHER_COMMUTE_MORNING_END` | `11:30` | Morning commute window end (HH:MM) |
+| `WEATHER_COMMUTE_EVENING_START` | `16:30` | Evening commute window start (HH:MM) |
+| `WEATHER_COMMUTE_EVENING_END` | `19:30` | Evening commute window end (HH:MM) |
+
+Example — change morning window to 07:00–10:00:
+```bash
+export WEATHER_COMMUTE_MORNING_START="07:00"
+export WEATHER_COMMUTE_MORNING_END="10:00"
+```
+
+The skill falls back to the registry JSON if env vars are unset or empty.
+
+
 ---
 
 ## Intent Classification
@@ -109,8 +131,8 @@ Pre-seeded locations in `skills/weather/location_registry.json`:
 
 | Alias | Display | Primary Query | Fallback Query | Timezone |
 |-------|---------|---------------|----------------|----------|
-| `home` | Home | SW1A 1AA (UK postcode) | Buckingham Palace, London | Europe/London |
-| `office` | Work | SE1 9SG (UK postcode) | City of London, England | Europe/London |
+| `home` | Home | SW1A 1AA (Buckingham Palace) | Buckingham Palace, London | Europe/London |
+| `office` | Work | EC3N 4AB (Tower of London) | Tower of London, England | Europe/London |
 | `atlanta` | Atlanta | Atlanta | Atlanta | America/New_York |
 | `curitiba` | Curitiba | Curitiba, Brazil | Curitiba | America/Sao_Paulo |
 | `rio` | Rio de Janeiro | Rio de Janeiro, Brazil | Rio de Janeiro | America/Sao_Paulo |

@@ -150,12 +150,33 @@ def get_weather(
 
 
 def get_commute_windows() -> dict:
-    """Return the commute window definitions from the registry."""
+    """
+    Return commute window definitions.
+
+    Env vars take precedence over the registry JSON:
+      WEATHER_COMMUTE_MORNING_START  (default 08:30)
+      WEATHER_COMMUTE_MORNING_END    (default 11:30)
+      WEATHER_COMMUTE_EVENING_START (default 16:30)
+      WEATHER_COMMUTE_EVENING_END   (default 19:30)
+
+    Allows operators to override commute windows without touching the JSON file.
+    """
     registry = _load_registry()
-    return registry.get("commute_windows", {
+    defaults = {
         "morning": {"start": "08:30", "end": "11:30"},
         "evening": {"start": "16:30", "end": "19:30"},
-    })
+    }
+    raw = registry.get("commute_windows", defaults)
+    return {
+        "morning": {
+            "start": os.environ.get("WEATHER_COMMUTE_MORNING_START") or raw.get("morning", {}).get("start", "08:30"),
+            "end": os.environ.get("WEATHER_COMMUTE_MORNING_END") or raw.get("morning", {}).get("end", "11:30"),
+        },
+        "evening": {
+            "start": os.environ.get("WEATHER_COMMUTE_EVENING_START") or raw.get("evening", {}).get("start", "16:30"),
+            "end": os.environ.get("WEATHER_COMMUTE_EVENING_END") or raw.get("evening", {}).get("end", "19:30"),
+        },
+    }
 
 
 def rain_in_window(
