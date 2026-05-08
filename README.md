@@ -4,7 +4,7 @@ Advanced weather skill for OpenClaw with intent classification, advice engine, a
 
 ## Features
 
-- **Intent Classification**: Tiered model approach (GPT 5.5-mini → Claude Haiku → Ollama → deterministic fallback)
+- **Intent Classification**: Tiered model approach (optional OpenAI-compatible LLM endpoint → GPT 5.4-mini direct fallback → Claude Haiku → Ollama → deterministic fallback)
 - **Advice Engine**: Smart weather recommendations (umbrella, jacket, sunglasses, wind/heat/cold warnings)
 - **Dual-Location Commute**: Automatically checks both home and office for rain during commute hours
 - **Rain Timing**: Shows when rain is expected with confidence percentage (e.g., "Rain 4pm-12am (100%)")
@@ -23,10 +23,16 @@ No API keys required. Works out of the box with Open-Meteo:
 For full capability with intent classification + weather alerts:
 
 ```bash
-export OPENWEATHERMAP_API_KEY="your-key"      # OpenWeatherMap One Call 3.0
-export OPENAI_API_KEY="your-key"              # GPT 5.5-mini for intent
-export ANTHROPIC_API_KEY="your-key"           # Claude Haiku fallback
+export OPENWEATHERMAP_API_KEY="your-key"              # OpenWeatherMap One Call 3.0
+export WEATHER_INTENT_LLM_ENABLED="true"              # Optional OpenAI-compatible intent endpoint
+export WEATHER_INTENT_LLM_BASE_URL="https://example/v1"
+export WEATHER_INTENT_LLM_MODEL="your-model-id"
+export WEATHER_INTENT_LLM_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"                      # Optional GPT 5.4-mini direct fallback
+export ANTHROPIC_API_KEY="your-key"                   # Claude Haiku fallback
 ```
+
+You can also copy `weather/intent_llm.example.json` to ignored `weather/intent_llm.json` or `weather/intent_llm.local.json` for local endpoint configuration.
 
 For custom intent model via Ollama:
 ```bash
@@ -36,7 +42,7 @@ export WEATHER_INTENT_MODEL="llama3.2:3b"      # Default: llama3.2:3b
 ## Usage
 
 ```python
-from skills.weather.skill import get_weather_chat, get_weather_briefing
+from weather.skill import get_weather_chat, get_weather_briefing
 
 # Chat query
 response = get_weather_chat("What's the weather?")
@@ -59,6 +65,8 @@ MIT
 ## Location Registry Privacy
 
 This repository ships `weather/location_registry.example.json` with public London landmark examples only. Copy it to `weather/location_registry.json` for local use. The real `location_registry.json` is ignored and must not be committed because it may contain private home/work coordinates, postcodes, aliases, or company names.
+
+The same pattern applies to intent LLM endpoint configuration: commit `weather/intent_llm.example.json` only. Keep real endpoint URLs, model routing, and private API-key env names in ignored `weather/intent_llm.json`, `weather/intent_llm.local.json`, environment variables, or your secret manager.
 
 Run the privacy gate before committing:
 

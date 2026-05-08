@@ -4,8 +4,8 @@ set -euo pipefail
 DENYLIST="${PRIVATE_DENYLIST:-.private-denylist}"
 MODE="${1:-tree}"
 
-blocked_path_regex='(^|/)location_registry(\.local|\.private)?\.json$'
-allowed_registry_regex='(^|/)location_registry\.example\.json$'
+blocked_path_regex='(^|/)(location_registry|intent_llm)(\.local|\.private)?\.json$'
+allowed_registry_regex='(^|/)(location_registry|intent_llm)\.example\.json$'
 
 check_file_list_for_private_registry() {
   local failed=0
@@ -31,7 +31,7 @@ scan_files_for_denylist() {
       [ -n "$file" ] || continue
       [ -f "$file" ] || continue
       case "$file" in
-        "$DENYLIST"|./"$DENYLIST"|*/location_registry.json|*/location_registry.local.json|*/location_registry.private.json) continue ;;
+        "$DENYLIST"|./"$DENYLIST"|*/location_registry.json|*/location_registry.local.json|*/location_registry.private.json|*/intent_llm.json|*/intent_llm.local.json|*/intent_llm.private.json) continue ;;
       esac
       if grep -Fqi -- "$pattern" "$file"; then
         echo "Potential private weather data in $file; matched local denylist entry." >&2
@@ -59,6 +59,9 @@ case "$MODE" in
       -path './weather/location_registry.json' -prune -o \
       -path './weather/location_registry.local.json' -prune -o \
       -path './weather/location_registry.private.json' -prune -o \
+      -path './weather/intent_llm.json' -prune -o \
+      -path './weather/intent_llm.local.json' -prune -o \
+      -path './weather/intent_llm.private.json' -prune -o \
       -type f -print | sed 's#^./##' > "$tmp_files"
     ;;
   *)

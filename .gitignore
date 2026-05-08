@@ -12,6 +12,11 @@ weather/location_registry.json
 weather/location_registry.local.json
 weather/location_registry.private.json
 
+# Weather skill private local intent LLM config; commit intent_llm.example.json instead.
+weather/intent_llm.json
+weather/intent_llm.local.json
+weather/intent_llm.private.json
+
 # Local privacy scan denylist; contains private values and must never be committed.
 .private-denylist
 .private-denylist.*
