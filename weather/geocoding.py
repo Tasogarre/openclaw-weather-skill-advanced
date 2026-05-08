@@ -1,203 +1,92 @@
 """
-geocoding.py — Dual-provider geocoding (OpenWeatherMap + Open-Meteo)
+geocoding.py — Location geocoding for the weather skill.
 
-OpenWeatherMap geocoding API docs:
-  https://openweathermap.org/api/geocoding-api#name
-
-Open-Meteo geocoding API docs:
-  https://open-meteo.com/en/docs/geocoding-api
-
-UK postcode support:
-  - OpenWeatherMap: /geo/1.0/zip?zip={postcode},{country_code}  (reliable for UK postcodes)
-  - Open-Meteo: name search (unreliable for UK postcodes like SW1A 1AA, SE1 9SG)
+Provides a small, dependency-free geocoding layer used by weather_engine.py and
+weather_fetcher.py. OpenWeatherMap is preferred when OPENWEATHERMAP_API_KEY is
+available, especially for UK postcodes; Open-Meteo remains the zero-config
+fallback.
 """
 
-import urllib.request
-import urllib.parse
-import urllib.error
+from __future__ import annotations
+
+from dataclasses import dataclass
 import json
-import re
 import logging
 import os
-from dataclasses import dataclass
-from typing import Optional
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
-OWM_GEO_API = "https://api.openweathermap.org/geo/1.0"
-OM_GEO_API = "https://geocoding-api.open-meteo.com/v1/search"
-
-# Environment variable for optional OpenWeatherMap API key
 OWM_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY", "")
+OWM_DIRECT_API = "https://api.openweathermap.org/geo/1.0/direct"
+OWM_ZIP_API = "https://api.openweathermap.org/geo/1.0/zip"
+OM_GEOCODING_API = "https://geocoding-api.open-meteo.com/v1/search"
+NOMINATIM_API = "https://nominatim.openstreetmap.org/search"
 
 
 @dataclass
 class GeoResult:
+    """Normalised geocoding result consumed by the weather fetcher."""
+
     name: str
     latitude: float
     longitude: float
-    country: str
-    admin1: str = ""   # state / region
+    country: str = ""
+    admin1: str = ""
     timezone: str = ""
-    elevation: float = 0.0
 
 
 class GeocodingError(Exception):
-    pass
+    """Raised when a location cannot be geocoded."""
+
+
+_UK_POSTCODE_RE = re.compile(r"^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$", re.IGNORECASE)
 
 
 def _is_uk_postcode(query: str) -> bool:
-    """Detect UK postcode pattern (e.g. SW1A 1AA, SE1 9SG, SW1A 1AA)."""
-    cleaned = query.strip().replace(" ", "").upper()
-    # UK postcodes: 2-4 letters + 2-3 digits, optional space
-    return bool(re.match(r'^[A-Z]{1,2}[0-9][0-9A-Z]?\s?[0-9][A-Z]{2}$', query.strip()))
+    return bool(_UK_POSTCODE_RE.match((query or "").strip()))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OpenWeatherMap geocoding
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _om_geocode(query: str, max_results: int = 3) -> list[GeoResult]:
-    """
-    Resolve via Open-Meteo Geocoding API.
-    Returns list (possibly empty). Raises GeocodingError on network error.
-    """
-    if not query or not query.strip():
-        raise GeocodingError("Empty query")
-
-    clean_query = _om_clean_query(query)
-
-    params = {
-        "name": clean_query,
-        "count": max_results,
-        "language": "en",
-        "format": "json",
-    }
-    url = f"{OM_GEO_API}?{urllib.parse.urlencode(params)}"
-
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "weather-skill/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        raise GeocodingError(f"Open-Meteo geocoding HTTP {e.code}: {e.reason}") from e
-    except Exception as e:
-        raise GeocodingError(f"Open-Meteo geocoding request failed: {e}") from e
-
-    results = data.get("results", [])
-    if not results:
-        return []
-
-    candidates = []
-    for r in results:
-        candidates.append(GeoResult(
-            name=r.get("name", ""),
-            latitude=r["latitude"],
-            longitude=r["longitude"],
-            country=r.get("country", ""),
-            admin1=r.get("admin1", ""),
-            timezone=r.get("timezone", ""),
-            elevation=r.get("elevation", 0.0),
-        ))
-    return candidates
+def _request_json(url: str, timeout: int = 12) -> object:
+    req = urllib.request.Request(url, headers={"User-Agent": "weather-skill/1.2"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
-def _om_clean_query(query: str) -> str:
-    """
-    Clean a location query string for Open-Meteo geocoding.
-
-    Open-Meteo's geocoding API has quirks that require careful query cleaning:
-
-    1. UK postcodes "SW1A 1AA" / "SE1 9SG": alphanumeric + space, must be sent as-is.
-       Adding anything extra causes NO RESULTS.
-
-    2. "City, Country" (no digits, has comma): open-meteo returns empty for Brazil
-       cities when ", Brazil" is appended. Strip the country suffix, query bare city.
-
-    3. "City, State" (no digits, has comma): open-meteo returns empty for Brazil
-       multi-word cities without comma. Strip the comma, query as "City State".
-
-    4. "City Country" / "City, Country" with country suffix stripped:
-       → strip comma if present → bare city name
-
-    5. US cities "City, State" with digits (postcode-like):
-       → keep comma to avoid postcode parsing confusion
-
-    Strategy:
-    - Strip trailing country suffix (", UK" / ", Brazil" / ", USA" → bare city)
-    - If query has digits: keep structure intact (UK postcodes, US ZIP codes)
-    - If query is letters+commas+spaces only: strip commas → "City State/Country" pattern
-    - Bare city names always work (API returns correct country first by population)
-    """
-    # Strip trailing country suffix (", UK" / ", Brazil" / ", USA" etc.)
-    # Pattern: optional comma-space, country name, optional state abbrev, end of string
-    cleaned = re.sub(r',?\s+[A-Z][a-z]+(\s+[A-Z]{2})?$', '', query).strip()
-
-    # UK postcodes: purely alphanumeric + spaces (no letters-only comma restriction)
-    # These must be sent as-is
-    if re.match(r'^[a-zA-Z0-9\s]+$', cleaned):
-        # Alphanumeric + spaces: send as-is, strip only multiple spaces
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        return cleaned
-
-    # No digits: city/state/country pattern → strip commas
-    # "City, State" or "City, Country" → "City State/Country" without comma
-    if re.match(r'^[a-zA-Z\s,]+$', cleaned):
-        cleaned = cleaned.replace(',', ' ')
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        return cleaned
-
-    # Has digits (US postcode "City, State ZIP" or similar): keep commas
-    return cleaned
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OpenWeatherMap geocoding (requires API key — primary for UK postcodes)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _owm_geocode_zip(postcode: str, country_code: str = "GB") -> Optional[GeoResult]:
-    """
-    Resolve a UK postcode via OpenWeatherMap /geo/1.0/zip endpoint.
-
-    Only available when OWM_API_KEY is set.
-    Returns None if key is missing or request fails.
-    """
+def _owm_geocode_zip(postcode: str) -> GeoResult | None:
+    """Geocode a UK postcode through OpenWeatherMap's zip endpoint."""
     if not OWM_API_KEY:
         return None
 
-    url = f"{OWM_GEO_API}/zip?zip={urllib.parse.quote(postcode)},{country_code}&appid={OWM_API_KEY}"
+    normalised = postcode.strip().upper().replace(" ", "")
+    params = {
+        "zip": f"{normalised},GB",
+        "appid": OWM_API_KEY,
+    }
+    url = f"{OWM_ZIP_API}?{urllib.parse.urlencode(params)}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "weather-skill/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
+        raw = _request_json(url)
+        return GeoResult(
+            name=str(raw.get("name") or postcode.upper()),
+            latitude=float(raw["lat"]),
+            longitude=float(raw["lon"]),
+            country=str(raw.get("country") or "GB"),
+            admin1="",
+            timezone=str(raw.get("timezone") or ""),
+        )
+    except (KeyError, ValueError, urllib.error.HTTPError) as e:
+        logger.debug("OWM zip geocode failed for %r: %s", postcode, e)
+        return None
     except Exception as e:
-        logger.debug(f"OWM zip geocode failed for '{postcode}': {e}")
+        logger.debug("OWM zip geocode request failed for %r: %s", postcode, e)
         return None
 
-    # OWM zip endpoint returns lat/lon directly
-    lat = data.get("lat")
-    lon = data.get("lon")
-    if lat is None or lon is None:
-        return None
 
-    return GeoResult(
-        name=postcode,
-        latitude=float(lat),
-        longitude=float(lon),
-        country=country_code,
-        admin1=data.get("state", ""),
-        timezone=data.get("timezone", ""),
-        elevation=float(data.get("elevation", 0)),
-    )
-
-
-def _owm_geocode_name(query: str, max_results: int = 3) -> list[GeoResult]:
-    """
-    Resolve a location name via OpenWeatherMap /geo/1.0/direct endpoint.
-
-    Only available when OWM_API_KEY is set.
-    Returns empty list on failure or when key is missing.
-    """
+def _owm_geocode_direct(query: str, max_results: int = 5) -> list[GeoResult]:
+    """Geocode free text through OpenWeatherMap's direct endpoint."""
     if not OWM_API_KEY:
         return []
 
@@ -206,107 +95,234 @@ def _owm_geocode_name(query: str, max_results: int = 3) -> list[GeoResult]:
         "limit": max_results,
         "appid": OWM_API_KEY,
     }
-    url = f"{OWM_GEO_API}/direct?{urllib.parse.urlencode(params)}"
-
+    url = f"{OWM_DIRECT_API}?{urllib.parse.urlencode(params)}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "weather-skill/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
+        raw = _request_json(url)
+        results: list[GeoResult] = []
+        if not isinstance(raw, list):
+            return []
+        for item in raw:
+            try:
+                local_names = item.get("local_names") or {}
+                name = local_names.get("en") or item.get("name") or query
+                results.append(
+                    GeoResult(
+                        name=str(name),
+                        latitude=float(item["lat"]),
+                        longitude=float(item["lon"]),
+                        country=str(item.get("country") or ""),
+                        admin1=str(item.get("state") or ""),
+                        timezone=str(item.get("timezone") or ""),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return results
+    except urllib.error.HTTPError as e:
+        logger.debug("OWM direct geocode HTTP error for %r: %s", query, e)
+        return []
     except Exception as e:
-        logger.debug(f"OWM name geocode failed for '{query}': {e}")
+        logger.debug("OWM direct geocode failed for %r: %s", query, e)
         return []
 
-    if not isinstance(data, list):
-        return []
 
-    candidates = []
-    for r in data:
-        candidates.append(GeoResult(
-            name=r.get("name", ""),
-            latitude=r["lat"],
-            longitude=r["lon"],
-            country=r.get("country", ""),
-            admin1=r.get("state", ""),
-            timezone=r.get("timezone", ""),
-            elevation=float(r.get("elevation", 0)),
-        ))
-    return candidates
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Public API — unified geocoding with OWM primary when key is available
-# ─────────────────────────────────────────────────────────────────────────────
-
-def geocode(query: str, max_results: int = 3) -> list[GeoResult]:
-    """
-    Resolve a free-text location query to lat/lon.
-
-    Resolution chain:
-      1. UK postcode detected + OWM API key available → OWM /geo/1.0/zip
-      2. OWM API key available → OWM /geo/1.0/direct (primary)
-      3. Open-Meteo (always available, fallback)
-
-    Returns list of candidates (possibly empty).
-    Raises GeocodingError on network errors (caller handles empty results gracefully).
-    """
-    if not query or not query.strip():
-        raise GeocodingError("Empty query")
-
-    # ── UK postcode shortcut via OWM zip endpoint ─────────────────────────────
-    if _is_uk_postcode(query) and OWM_API_KEY:
-        result = _owm_geocode_zip(query.strip())
-        if result:
-            return [result]
-        # Fall through to other providers
-
-    # ── OWM direct geocoding (primary when key available) ────────────────────
-    if OWM_API_KEY:
-        owm_results = _owm_geocode_name(query, max_results=max_results)
-        if owm_results:
-            return owm_results
-
-    # ── Open-Meteo fallback (always available) ────────────────────────────────
+def _om_geocode(query: str, max_results: int = 5) -> list[GeoResult]:
+    """Geocode free text through Open-Meteo's zero-config geocoding API."""
+    params = {
+        "name": query,
+        "count": max_results,
+        "language": "en",
+        "format": "json",
+    }
+    url = f"{OM_GEOCODING_API}?{urllib.parse.urlencode(params)}"
     try:
-        results = _om_geocode(query, max_results=max_results)
-        if results:
-            return results
-    except GeocodingError:
-        pass  # fall through
+        raw = _request_json(url)
+        rows = raw.get("results") if isinstance(raw, dict) else None
+        if not rows:
+            return []
+        results: list[GeoResult] = []
+        for item in rows:
+            try:
+                results.append(
+                    GeoResult(
+                        name=str(item.get("name") or query),
+                        latitude=float(item["latitude"]),
+                        longitude=float(item["longitude"]),
+                        country=str(item.get("country_code") or item.get("country") or ""),
+                        admin1=str(item.get("admin1") or ""),
+                        timezone=str(item.get("timezone") or ""),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return results
+    except urllib.error.HTTPError as e:
+        logger.debug("Open-Meteo geocode HTTP error for %r: %s", query, e)
+        return []
+    except Exception as e:
+        logger.debug("Open-Meteo geocode failed for %r: %s", query, e)
+        return []
 
-    # No results from any provider
+
+def _nominatim_geocode(query: str, max_results: int = 1) -> list[GeoResult]:
+    """Best-effort OpenStreetMap/Nominatim fallback for street-level free text."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    params = {
+        "q": q,
+        "format": "jsonv2",
+        "limit": max_results,
+        "addressdetails": 1,
+        "countrycodes": "gb" if "london" in q.lower() or re.search(r"\b[A-Z]{1,2}\d", q, re.IGNORECASE) else "",
+    }
+    params = {k: v for k, v in params.items() if v not in ("", None)}
+    url = f"{NOMINATIM_API}?{urllib.parse.urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "weather-skill/1.3 OpenClaw"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(raw, list):
+            return []
+        results: list[GeoResult] = []
+        for item in raw:
+            try:
+                address = item.get("address") if isinstance(item.get("address"), dict) else {}
+                country_code = address.get("country_code") or ""
+                country = str(country_code).upper() or str(address.get("country") or "")
+                results.append(
+                    GeoResult(
+                        name=str(item.get("display_name") or item.get("name") or q),
+                        latitude=float(item["lat"]),
+                        longitude=float(item["lon"]),
+                        country=country,
+                        admin1=str(address.get("state") or ""),
+                        timezone="Europe/London" if country == "GB" else "",
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return results
+    except Exception as e:
+        logger.debug("Nominatim geocode failed for %r: %s", query, e)
+        return []
+
+
+def _web_search_geocode(query: str) -> list[GeoResult]:
+    """
+    Final best-effort fallback for free-text locations that provider geocoders miss.
+
+    This deliberately returns an empty list on failure. The normal publication path
+    must not depend on web-search scraping; it is only a last resort for unusual
+    operator-entered locations.
+    """
+    try:
+        search_q = f"{query} address London"
+        encoded_q = urllib.parse.quote(search_q)
+        url = f"https://duckduckgo.com/html/?q={encoded_q}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        html = urllib.parse.unquote(html)
+
+        postcode_pattern = r"\b[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}\b"
+        match = re.search(postcode_pattern, html)
+        if match:
+            postcode = match.group(0).replace(" ", "")
+            results = _nominatim_geocode(postcode, max_results=1)
+            if results:
+                logger.debug("web search resolved %r -> postcode %s -> %s", query, postcode, results[0])
+                return results
+            result = _owm_geocode_zip(postcode)
+            if result:
+                logger.debug("web search resolved %r -> postcode %s -> %s", query, postcode, result)
+                return [result]
+
+        address_patterns = [
+            r"\b\d+[A-Z]?\s+Lower\s+Marsh\b",
+            r"\b\d+[A-Z]?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\b",
+        ]
+        for pattern in address_patterns:
+            for match in re.finditer(pattern, html):
+                candidate = match.group(0)
+                if any(skip in candidate.lower() for skip in ("mozilla", "duckduckgo", "html")):
+                    continue
+                results = _nominatim_geocode(f"{candidate}, London", max_results=1)
+                if results:
+                    logger.debug("web search resolved %r -> address %s -> %s", query, candidate, results[0])
+                    return results
+
+        lat_match = re.search(r'data-lat="([^"]+)"', html)
+        lon_match = re.search(r'data-lon="([^"]+)"', html)
+        if lat_match and lon_match:
+            return [
+                GeoResult(
+                    name=query.title(),
+                    latitude=float(lat_match.group(1)),
+                    longitude=float(lon_match.group(1)),
+                    country="GB",
+                    admin1="England",
+                    timezone="Europe/London",
+                )
+            ]
+    except Exception as e:
+        logger.debug("web search geocode failed for %r: %s", query, e)
     return []
 
 
-def geocode_with_fallback(primary_query: str, fallback_query: str) -> GeoResult:
+def geocode(query: str, max_results: int = 5) -> list[GeoResult]:
     """
-    Attempt geocoding with a two-step fallback chain.
+    Geocode a location query.
 
-    1. Try primary_query (cleaned internally)
-    2. If no results, try fallback_query
-    3. If still no results, raise GeocodingError
-
-    Returns the first available result.
+    Order:
+    1. UK postcode via OpenWeatherMap zip endpoint when available.
+    2. OpenWeatherMap direct endpoint when available.
+    3. Open-Meteo zero-config endpoint.
+    4. Best-effort web-search fallback.
     """
-    for q in [primary_query, fallback_query]:
-        if not q:
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    if _is_uk_postcode(q):
+        result = _owm_geocode_zip(q)
+        if result:
+            return [result]
+
+    results = _owm_geocode_direct(q, max_results=max_results)
+    if results:
+        return results[:max_results]
+
+    results = _om_geocode(q, max_results=max_results)
+    if results:
+        return results[:max_results]
+
+    london_q = q if re.search(r"\blondon\b", q, re.IGNORECASE) else f"{q} London"
+    results = _nominatim_geocode(london_q, max_results=max_results)
+    if results:
+        return results[:max_results]
+
+    results = _web_search_geocode(q)
+    return results[:max_results]
+
+
+def geocode_with_fallback(primary_query: str, fallback_query: str = "") -> GeoResult:
+    """
+    Resolve a primary query, then a fallback query.
+
+    Intended for registry entries where the primary query is precise (for example
+    a UK postcode) and the fallback query is a human-readable place name that the
+    free Open-Meteo geocoder can resolve.
+    """
+    attempted: list[str] = []
+    for q in (primary_query, fallback_query):
+        q = (q or "").strip()
+        if not q or q in attempted:
             continue
+        attempted.append(q)
+        results = geocode(q, max_results=1)
+        if results:
+            return results[0]
 
-        # UK postcode + OWM key shortcut
-        if _is_uk_postcode(q) and OWM_API_KEY:
-            result = _owm_geocode_zip(q.strip())
-            if result:
-                logger.debug(f"OWM zip geocoded '{q}' -> {result}")
-                return result
-
-        try:
-            results = geocode(q, max_results=1)
-            if results:
-                logger.debug(f"Geocoded '{q}' -> {results[0]}")
-                return results[0]
-        except GeocodingError as e:
-            logger.debug(f"Geocode attempt for '{q}' failed: {e}")
-            continue
-
-    raise GeocodingError(
-        f"Could not resolve location: primary='{primary_query}', fallback='{fallback_query}'"
-    )
+    detail = ", ".join(repr(q) for q in attempted) or "<empty query>"
+    raise GeocodingError(f"No geocoding results for {detail}")

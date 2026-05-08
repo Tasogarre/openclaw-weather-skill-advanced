@@ -1,0 +1,145 @@
+{
+  "version": "2.0.0",
+  "description": "Example named-location registry for the weather skill. Copy this file to location_registry.json and customise locally. Do not commit real home addresses, postcodes, company names, or personal coordinates.",
+  "locations": {
+    "home": {
+      "canonical": "home",
+      "display_name": "Home",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "home"
+      ],
+      "is_default": true,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.5014,
+        "longitude": -0.1419,
+        "postcode": "SW1A 1AA",
+        "address": "Buckingham Palace, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    },
+    "office": {
+      "canonical": "office",
+      "display_name": "Office",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "office",
+        "work",
+        "the office"
+      ],
+      "is_default": false,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.5045,
+        "longitude": -0.0865,
+        "postcode": "SE1 9SG",
+        "address": "The Shard, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    },
+    "st_pauls": {
+      "canonical": "st_pauls",
+      "display_name": "St Paul's Cathedral",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "st pauls",
+        "st paul's",
+        "st paul's cathedral",
+        "saint pauls"
+      ],
+      "is_default": false,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.5139,
+        "longitude": -0.0983,
+        "postcode": "EC4M 8AD",
+        "address": "St Paul's Cathedral, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    },
+    "tower_bridge": {
+      "canonical": "tower_bridge",
+      "display_name": "Tower Bridge",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "tower bridge",
+        "the tower bridge"
+      ],
+      "is_default": false,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.5055,
+        "longitude": -0.0754,
+        "postcode": "SE1 2UP",
+        "address": "Tower Bridge, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    },
+    "hyde_park": {
+      "canonical": "hyde_park",
+      "display_name": "Hyde Park",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "hyde park",
+        "the park"
+      ],
+      "is_default": false,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.5073,
+        "longitude": -0.1657,
+        "postcode": "W2 2UH",
+        "address": "Hyde Park, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    },
+    "greenwich": {
+      "canonical": "greenwich",
+      "display_name": "Greenwich Observatory",
+      "country": "GB",
+      "timezone": "Europe/London",
+      "aliases": [
+        "greenwich",
+        "greenwich observatory",
+        "royal observatory"
+      ],
+      "is_default": false,
+      "lookup": {
+        "type": "coordinates",
+        "latitude": 51.4769,
+        "longitude": -0.0005,
+        "postcode": "SE10 8XJ",
+        "address": "Royal Observatory Greenwich, London"
+      },
+      "source": "example",
+      "confidence": "example",
+      "last_used_at": "2026-05-08T01:47:55Z"
+    }
+  },
+  "commute_windows": {
+    "morning": {
+      "start": "08:30",
+      "end": "11:30"
+    },
+    "evening": {
+      "start": "17:00",
+      "end": "19:00"
+    }
+  }
+}

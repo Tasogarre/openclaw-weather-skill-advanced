@@ -54,3 +54,15 @@ See [SKILL.md](./weather/SKILL.md) for full documentation.
 ## License
 
 MIT
+
+
+## Location Registry Privacy
+
+This repository ships `weather/location_registry.example.json` with public London landmark examples only. Copy it to `weather/location_registry.json` for local use. The real `location_registry.json` is ignored and must not be committed because it may contain private home/work coordinates, postcodes, aliases, or company names.
+
+Run the privacy gate before committing:
+
+```bash
+scripts/check-private-weather-data.sh tree
+scripts/check-private-weather-data.sh staged
+```

@@ -10,20 +10,25 @@ replace bin/morning_briefing.py; it is the foundation for the Phase 3
 integration once the new engine is verified.
 """
 
-import json
+from __future__ import annotations
+
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .geocoding import geocode_with_fallback, GeoResult, GeocodingError
+from .geocoding import GeoResult, GeocodingError
+from .location_registry import (
+    DEFAULT_REGISTRY_PATH,
+    add_dynamic_location,
+    load_registry,
+    resolve_registry_location,
+)
 from .weather_fetcher import fetch_forecast, WeatherFetchError
 from .weather_models import WeatherData
 
 logger = logging.getLogger(__name__)
-
-# Registry path — designed to also support memory/ override later
-DEFAULT_REGISTRY_PATH = Path(__file__).parent / "location_registry.json"
 
 # Commute window defaults (also in registry JSON, kept here for programmatic access)
 COMMUTE_MORNING = ("08:30", "11:30")
@@ -39,8 +44,7 @@ class WeatherEngineError(Exception):
 
 
 def _load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> dict:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    return load_registry(path)
 
 
 def resolve_location(location_input: str) -> tuple[dict, GeoResult]:
@@ -55,33 +59,9 @@ def resolve_location(location_input: str) -> tuple[dict, GeoResult]:
 
     Returns (registry_entry_or_None, geo_result)
     """
-    registry = _load_registry()
-    locations = registry.get("locations", {})
-
-    input_lower = location_input.lower().strip()
-
-    # Bare or empty query -> default to home
-    if input_lower in ("", "home", "."):
-        for alias, entry in locations.items():
-            if entry.get("is_default"):
-                try:
-                    geo = geocode_with_fallback(entry["primary_query"], entry.get("fallback_query", ""))
-                    return entry, geo
-                except GeocodingError as e:
-                    raise LocationNotFoundError(f"Default location not resolvable: {e}") from e
-        raise LocationNotFoundError("No default location configured")
-
-    # Step 1: check registry aliases
-    for alias, entry in locations.items():
-        if input_lower in [alias] + entry.get("aliases", []):
-            primary_q = entry["primary_query"]
-            fallback_q = entry.get("fallback_query", "")
-            try:
-                geo = geocode_with_fallback(primary_q, fallback_q)
-                return entry, geo
-            except GeocodingError as e:
-                logger.warning(f"Registry alias '{alias}' geocode failed: {e}")
-                raise LocationNotFoundError(f"Could not resolve location '{location_input}'") from e
+    registry_result = resolve_registry_location(location_input)
+    if registry_result:
+        return registry_result.entry, registry_result.geo
 
     # Step 2: free-text geocoding (no registry match)
     try:
@@ -98,12 +78,9 @@ def resolve_location(location_input: str) -> tuple[dict, GeoResult]:
 
 def get_default_location() -> tuple[dict, GeoResult]:
     """Resolve the default location (home) from the registry."""
-    registry = _load_registry()
-    locations = registry.get("locations", {})
-    for alias, entry in locations.items():
-        if entry.get("is_default"):
-            geo = geocode_with_fallback(entry["primary_query"], entry.get("fallback_query", ""))
-            return entry, geo
+    registry_result = resolve_registry_location("home") or resolve_registry_location("")
+    if registry_result:
+        return registry_result.entry, registry_result.geo
     # Fallback: hard-code London
     from .geocoding import geocode
     results = geocode("London", max_results=1)
@@ -128,18 +105,25 @@ def get_weather(
     Raises LocationNotFoundError, WeatherEngineError on failure.
     """
     try:
+        requested_location = location_input or location_alias
+        resolved_entry = None
         if location_input:
-            _, geo = resolve_location(location_input)
+            resolved_entry, geo = resolve_location(location_input)
         elif location_alias:
             registry = _load_registry()
             entry = registry.get("locations", {}).get(location_alias)
             if not entry:
                 raise WeatherEngineError(f"Unknown location alias: {location_alias}")
-            _, geo = resolve_location(location_alias)
+            resolved_entry, geo = resolve_location(location_alias)
         else:
-            _, geo = get_default_location()
+            resolved_entry, geo = get_default_location()
 
-        return fetch_forecast(geo)
+        weather = fetch_forecast(geo)
+        if requested_location and resolved_entry is None and weather.has_usable_data():
+            confirmation = add_dynamic_location(requested_location, geo, confidence="high")
+            if confirmation:
+                setattr(weather, "registry_confirmation", confirmation)
+        return weather
 
     except LocationNotFoundError:
         raise
@@ -184,6 +168,9 @@ def rain_in_window(
     window_start: str,
     window_end: str,
     probability_threshold: int = 40,
+    *,
+    window_start_dt: datetime | None = None,
+    window_end_dt: datetime | None = None,
 ) -> bool:
     """
     Check whether precipitation is expected during a specific time window.
@@ -197,7 +184,16 @@ def rain_in_window(
     Returns True if any hourly block in the window has precip probability >= threshold.
     """
     from datetime import time as dt_time
-    from datetime import datetime as dt_datetime
+
+    if window_start_dt and window_end_dt:
+        for hp in weather.hourly_precipitation:
+            hp_time = hp.time
+            if hp_time.tzinfo and window_start_dt.tzinfo:
+                hp_time = hp_time.astimezone(window_start_dt.tzinfo)
+            in_window = window_start_dt <= hp_time <= window_end_dt
+            if in_window and hp.probability >= probability_threshold:
+                return True
+        return False
 
     try:
         start_h, start_m = map(int, window_start.split(":"))

@@ -15,8 +15,94 @@ Advice rules:
   cold_caution feels-like <0°C
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime, timezone
+from typing import NamedTuple, Optional
+
+
+class ScoredBestTimeWindow(NamedTuple):
+    """A single scored hour from the best-time optimization."""
+    time: datetime
+    precip_probability: int
+    wind_speed: Optional[float] = None
+    feels_like: Optional[float] = None
+
+
+def score_best_time_windows(
+    weather: WeatherData,
+    candidate_start_hour: int,
+    candidate_end_hour: int,
+    now: Optional[datetime] = None,
+    precip_threshold: int = 30,
+) -> list[ScoredBestTimeWindow]:
+    """
+    Score candidate one-hour windows for best-time outing.
+
+
+    Candidate windows are built from hourly_precipitation rows that fall
+    within [candidate_start_hour, candidate_end_hour). Windows are scored
+    by lowest precipitation probability first, then lower wind risk, then
+    comfortable temperature. Past windows (before `now`) are excluded.
+
+
+    Args:
+        weather: WeatherData with hourly_precipitation populated
+        candidate_start_hour: first hour to consider (0-23)
+        candidate_end_hour: last hour (exclusive upper bound, 0-23)
+        now: current time for today clamping (UTC datetime)
+        precip_threshold: do not recommend windows with precip > this
+
+
+    Returns:
+        Sorted list of ScoredBestTimeWindow, best first.
+        Empty list if no valid windows or hourly data unavailable.
+    """
+    if not weather.hourly_precipitation:
+        return []
+
+    scored: list[ScoredBestTimeWindow] = []
+    # Normalise all datetimes to naive for consistent comparison
+    # (hourly data may be UTC-aware or naive; now may be UTC-aware or naive)
+    if now is not None and now.tzinfo is not None:
+        now_ts = now.replace(tzinfo=None)
+    else:
+        now_ts = now
+
+    # Build index of hourly_forecast for wind/temperature lookup
+    hourly_lookup: dict[int, tuple[float, float]] = {}
+    for hf in weather.hourly_forecast:
+        hourly_lookup[hf.time.hour] = (hf.time, hf.feels_like)
+
+    for hp in weather.hourly_precipitation:
+        hour = hp.time.hour
+        # Filter to candidate range
+        if not (candidate_start_hour <= hour < candidate_end_hour):
+            continue
+        # Exclude past windows for today (strip tzinfo for comparison consistency)
+        hp_ts = hp.time.replace(tzinfo=None) if hp.time.tzinfo else hp.time
+        if now_ts is not None and hp_ts <= now_ts:
+            continue
+        # Skip windows with very high rain probability
+        if hp.probability > precip_threshold:
+            continue
+        wind = None
+        feels_like = None
+        if hour in hourly_lookup:
+            _, feels_like = hourly_lookup[hour]
+        scored.append(ScoredBestTimeWindow(
+            time=hp.time,
+            precip_probability=hp.probability,
+            wind_speed=wind,
+            feels_like=feels_like,
+        ))
+
+
+    # Sort: lowest precip first, then wind, then temperature comfort
+    scored.sort(key=lambda w: (w.precip_probability, (w.wind_speed or 0) / 10.0, abs((w.feels_like or 15) - 18) / 5.0))
+    return scored
+
 
 from .weather_models import WeatherData
 

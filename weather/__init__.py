@@ -1,9 +1,11 @@
 """
-weather skill — v1.1.0
-Multi-location rich weather forecasting powered by Open-Meteo (always) or OpenWeatherMap (when key available).
+weather skill — v1.3.0
+Multi-location rich weather forecasting with Phase 2 intent classification,
+advice, commute-aware chat output, and briefing formatting. Powered by
+Open-Meteo (always) or OpenWeatherMap (when key available).
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Public API surface for Phase 1 + Phase 2
 from .weather_models import (

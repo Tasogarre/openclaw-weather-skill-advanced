@@ -11,6 +11,26 @@ from ..weather_models import WeatherData
 from ..advice_engine import WeatherAdvice
 
 
+def condition_emoji(condition: str, precip_probability: int = 0) -> str:
+    """Return a compact weather-condition emoji for forecast labels."""
+    text = (condition or "").lower()
+    if precip_probability >= 50:
+        return "🌧️"
+    if any(term in text for term in ("thunder", "storm")):
+        return "⛈️"
+    if any(term in text for term in ("rain", "drizzle", "shower")):
+        return "🌧️"
+    if any(term in text for term in ("snow", "sleet", "ice")):
+        return "❄️"
+    if any(term in text for term in ("overcast", "cloud")):
+        return "☁️"
+    if any(term in text for term in ("clear", "sun", "few clouds")):
+        return "☀️"
+    if any(term in text for term in ("mist", "fog", "haze")):
+        return "🌫️"
+    return "🌤️"
+
+
 def format_chat(
     weather: WeatherData,
     advice: Optional[WeatherAdvice] = None,
@@ -48,11 +68,12 @@ def format_chat(
         temp = curr.temperature
         feels = curr.feels_like
         condition = curr.condition
+        icon = condition_emoji(condition, int(curr.precipitation_mm > 0) * 100)
 
         if temp == feels:
-            condition_line = f"🌡️ {temp:.0f}°C — {condition}"
+            condition_line = f"🌡️ {temp:.0f}°C — {icon} {condition}"
         else:
-            condition_line = f"🌡️ {temp:.0f}°C, feels like {feels:.0f}°C — {condition}"
+            condition_line = f"🌡️ {temp:.0f}°C, feels like {feels:.0f}°C — {icon} {condition}"
 
         lines.append(condition_line)
 
@@ -76,10 +97,12 @@ def format_chat(
     outlook_parts = []
     if weather.today:
         t = weather.today
-        outlook_parts.append(f"Today: High {t.high:.0f}°C / Low {t.low:.0f}°C")
+        icon = condition_emoji(t.condition, t.precip_probability)
+        outlook_parts.append(f"Today: {icon} {t.condition} — High {t.high:.0f}°C / Low {t.low:.0f}°C")
     if weather.tomorrow:
         t = weather.tomorrow
-        outlook_parts.append(f"Tomorrow: High {t.high:.0f}°C / Low {t.low:.0f}°C")
+        icon = condition_emoji(t.condition, t.precip_probability)
+        outlook_parts.append(f"Tomorrow: {icon} {t.condition} — High {t.high:.0f}°C / Low {t.low:.0f}°C")
 
     if outlook_parts:
         lines.append("\n".join(outlook_parts))
@@ -98,9 +121,11 @@ def _format_advice(advice: WeatherAdvice) -> list[str]:
     """Format WeatherAdvice into advisory lines."""
     result = []
 
-    # Commute umbrella (special case)
+    # Umbrella decision: use a practical visual label, not generic decoration.
     if advice.umbrella_reasons:
-        result.append(f"💡 Bring an umbrella — {advice.umbrella_reasons[0]}")
+        result.append(f"☔ Umbrella: bring one — {advice.umbrella_reasons[0]}")
+    elif not advice.alerts_text:
+        result.append("☔ Umbrella: not needed based on current forecast")
 
     # Sunglasses
     if advice.sunglasses:

@@ -1,8 +1,17 @@
+# Python/runtime artefacts
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .env
-*.egg-info/
-.venv/
-venv/
+*.local
+
+# Weather skill private local location registry; commit location_registry.example.json instead.
+weather/location_registry.json
+weather/location_registry.local.json
+weather/location_registry.private.json
+
+# Local privacy scan denylist; contains private values and must never be committed.
+.private-denylist
+.private-denylist.*

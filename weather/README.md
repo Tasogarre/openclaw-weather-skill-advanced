@@ -1,229 +1,248 @@
 # weather — Rich Weather Skill
 
-Weather forecasting for multiple named locations with commute-aware advice.
+Version 1.3.0 weather forecasting for named locations, commute-aware advice, chat answers, and morning briefing output.
 
-**Version 1.2.0** · Phase 2 · Zero-config with Open-Meteo
+Works out of the box with Open-Meteo. Add `OPENWEATHERMAP_API_KEY` for OpenWeatherMap One Call 3.0, UK postcode geocoding, and weather alerts.
 
 ---
 
+## Mandatory Assistant Routing
+
+Any weather-related user request — including forecasts, rain, umbrella decisions, clothing decisions driven by weather, commute weather, travel weather, or best-time-for-weather planning — must route through this skill before the assistant answers. Do not answer such requests generically or ask broad location questions before invoking the skill path.
+
+Operational runbook: `docs/runbooks/weather-request-routing-runbook.md`.
+
 ## Quick Start
 
-No configuration needed. Works out of the box.
+From the workspace root:
 
 ```python
 from skills.weather.skill import get_weather_chat, get_weather_briefing
 
-# Interactive chat query
-print(get_weather_chat("What's the weather in atlanta?"))
-
-# Morning briefing (compact)
-print(get_weather_briefing())
-
-# Commute query
-print(get_weather_chat("Do I need an umbrella when I go to the office tomorrow?"))
+print(get_weather_chat("What's the weather?"))
+print(get_weather_chat("Do I need an umbrella for my commute to work tomorrow morning?"))
+print(get_weather_briefing(location="home"))
 ```
 
-Or in bash:
+Bash example:
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '/Users/openclaw/.openclaw/workspace/skills/weather')
-from skill import get_weather_chat
-print(get_weather_chat('What is the weather in atlanta?'))
-"
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "/Users/openclaw/.openclaw/workspace")
+from skills.weather.skill import get_weather_chat
+print(get_weather_chat("What is the weather in Atlanta?"))
+PY
 ```
 
 ---
 
-## Features
+## What It Does
 
-### Zero-config
-Open-Meteo is used by default — no API key required. Add `OPENWEATHERMAP_API_KEY` for UK postcode geocoding and weather alerts.
+- Resolves named locations: `home`, `office`, `atlanta`, `curitiba`, `rio`, `saopaulo`.
+- Fetches weather through OpenWeatherMap when configured, otherwise Open-Meteo.
+- Classifies natural-language weather queries.
+- Gives advice for umbrella, sunglasses, jackets, wind, heat, cold, and alerts.
+- Handles commute queries by checking both home and office during the commute window.
+- Formats interactive chat responses with emoji.
+- Formats morning briefing responses as compact one-line summaries.
+- Reports rain timing such as `Rain 4pm-12am (100%)`.
+- Uses the 23:00 hourly forecast for `Low X°C tonight` rather than tomorrow's daily low.
 
-### Multi-location
-Pre-seeded locations: **home**, **office**, **atlanta**, **curitiba**, **rio**, **saopaulo**
+---
 
-```python
-get_weather_chat("Weather in rio")
-get_weather_chat("Do I need an umbrella for my commute to work?")
-```
+## Configuration
 
-### Commute-aware advice
-Queries mentioning commute or office automatically check rain at both home AND office locations during the morning commute window (08:30–11:30). Advises umbrella if rain is expected at either location.
+| Variable | Required | Default | Purpose |
+|---|---:|---|---|
+| `OPENWEATHERMAP_API_KEY` | no | unset | Enables OpenWeatherMap, UK postcode geocoding, and alerts |
+| `OPENAI_API_KEY` | no | unset | Enables GPT 5.5-mini intent classification |
+| `ANTHROPIC_API_KEY` | no | unset | Enables Claude Haiku intent classification |
+| `OLLAMA_HOST` | no | `http://localhost:11434` | Ollama endpoint |
+| `WEATHER_INTENT_MODEL` | no | `llama3.2:3b` | Ollama classifier model |
+| `WEATHER_COMMUTE_MORNING_START` | no | `08:30` | Morning commute start |
+| `WEATHER_COMMUTE_MORNING_END` | no | `11:30` | Morning commute end |
+| `WEATHER_COMMUTE_EVENING_START` | no | `16:30` | Evening commute start |
+| `WEATHER_COMMUTE_EVENING_END` | no | `19:30` | Evening commute end |
 
-### Rain timing
-Briefing output shows when rain is expected and for how long:
+No configuration is needed for the default Open-Meteo path.
 
-```
-Rain 4pm-12am (100%) — bring umbrella
-```
+---
 
-### Tonight's low
-Tonight's low is taken from the **11pm hourly forecast** (not tomorrow's daily low) so you know the temperature going to bed.
+## Intent Classifier
+
+The classifier returns location, time reference, intent type, and commute/travel flags. It uses this fallback chain:
+
+1. GPT 5.5-mini when `OPENAI_API_KEY` is set.
+2. Claude Haiku when `ANTHROPIC_API_KEY` is set.
+3. Ollama using `WEATHER_INTENT_MODEL`, default `llama3.2:3b`.
+4. Deterministic keyword/pattern fallback, always available.
+
+Recognised patterns include general forecasts, rain/snow questions, umbrella/clothing advice, commute-to-work queries, and a small set of travel-weather questions.
+
+---
+
+## Locations
+
+Locations are configured in `location_registry.json`.
+
+| Alias | Display | Notes |
+|---|---|---|
+| `home` | Home | default location, UK postcode primary query |
+| `office` | Work | The Shard / SE1 9SG |
+| `atlanta` | Atlanta | city-name geocoding |
+| `curitiba` | Curitiba | city-name geocoding |
+| `rio` | Rio de Janeiro | city-name geocoding |
+| `saopaulo` | São Paulo | city-name geocoding |
+
+Home and office are used together for commute checks.
 
 ---
 
 ## Usage Examples
 
-### Interactive queries
+### General chat
 
-**General weather:**
-```
-You: What's the weather?
-→ 📍 Home
-   🌡️ 9°C, feels like 8°C — Overcast clouds
-   💧 Rain expected (100% chance today)
-
-   Today: High 18°C / Low 8°C
-   Tomorrow: High 16°C / Low 8°C
-
-   💡 Bring an umbrella — rain expected (100% chance)
-   🧥 Jacket needed — feels like 7.52°C — cold
+```python
+get_weather_chat("What's the weather?")
 ```
 
-**Commute query:**
-```
-You: Do I need an umbrella for my commute to work tomorrow morning?
-→ 🏠 **Home**
-   🌡️ 9°C, feels like 8°C — Overcast clouds
-   💧 Rain expected (100% chance today)
-   Today: High 18°C / Low 8°C
-   Tomorrow: High 16°C / Low 8°C
+Example shape:
 
-   💡 Bring an umbrella — rain expected (100% chance)
-   🧥 Jacket needed — feels like 7.52°C — cold
+```text
+📍 Home
+🌡️ 9°C, feels like 8°C — Overcast clouds
+💧 Rain expected (100% chance today)
+Today: High 18°C / Low 8°C
+Tomorrow: High 16°C / Low 8°C
+
+💡 Bring an umbrella — rain expected (100% chance)
+🧥 Jacket needed — feels like 7.52°C — cold
+```
+
+### City query
+
+```python
+get_weather_chat("What's the weather in Atlanta?")
+```
+
+### Rain query
+
+```python
+get_weather_chat("Will it rain tomorrow?")
+```
+
+### Advice query
+
+```python
+get_weather_chat("Should I bring sunglasses?")
+```
+
+### Commute query
+
+```python
+get_weather_chat("Do I need an umbrella for my commute to work tomorrow morning?")
+```
+
+Example shape:
+
+```text
+🏠 **Home**
+🌡️ 9°C, feels like 8°C — Overcast clouds
+...
 
 🏢 **Office**
-   🌡️ 9°C, feels like 7°C — Overcast clouds
-   💧 Rain expected (100% chance today)
-   Today: High 18°C / Low 8°C
-   Tomorrow: High 16°C / Low 8°C
-
-   💡 Bring an umbrella — rain expected (100% chance)
-   🧥 Jacket needed — feels like 7.42°C — cold
+🌡️ 9°C, feels like 7°C — Overcast clouds
+...
 
 💡 **Commute advice:** Bring an umbrella — rain expected during morning commute
    • Rain expected at Home during morning commute (08:30–11:30)
    • Rain expected at Office during morning commute (08:30–11:30)
 ```
 
-**Advice query:**
-```
-You: Should I bring sunglasses?
-→ (checks UV index and conditions for current location)
-```
-
 ### Morning briefing
 
 ```python
-get_weather_briefing()
-# → **Weather:** Current 9°C, overcast. High 18°C. Low 10°C tonight. Rain 4pm-12am (100%) — bring umbrella. Warm jacket
+get_weather_briefing(location="home")
 ```
 
----
+Example:
 
-## Configuration
-
-### Environment variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OPENWEATHERMAP_API_KEY` | No | — | Enables OpenWeatherMap One Call 3.0, UK postcode geocoding, and weather alerts |
-| `OPENAI_API_KEY` | No | — | Enables GPT 5.5-mini for intent classification (tier 1) |
-| `ANTHROPIC_API_KEY` | No | — | Enables Claude Haiku for intent classification (tier 2) |
-| `OLLAMA_HOST` | No | `http://localhost:11434` | Ollama API endpoint for local intent classification fallback |
-| `WEATHER_INTENT_MODEL` | No | `llama3.2:3b` | Ollama model for intent classification (tier 3 fallback) |
-
-Without `OPENWEATHERMAP_API_KEY`, Open-Meteo is used automatically (no key required, no alerts).
-
-### Location registry
-
-Locations are defined in `location_registry.json`. The home and office locations use UK postcodes for precise geocoding via OpenWeatherMap. Other locations use city names.
-
-```json
-{
-  "home": {
-    "display_name": "Home",
-    "primary_query": "SW1A 1AA",
-    "fallback_query": "Buckingham Palace, London",
-    "timezone": "Europe/London",
-    "commute_windows": {
-      "morning": {"start": "08:30", "end": "11:30"},
-      "evening": {"start": "16:30", "end": "19:30"}
-    }
-  }
-}
+```text
+**Weather:** Current 9°C, overcast clouds. High 18°C. Low 10°C tonight. Rain 4pm-12am (100%) — bring umbrella. Warm jacket
 ```
 
-### Intent classifier
-
-The intent classifier (Gemma4 e4b via Ollama) determines query type and location. If Ollama is unavailable, deterministic keyword/pattern rules are used as fallback.
-
-Supported query patterns:
-- `"What's the weather?"` → general, home, now
-- `"Do I need an umbrella for my commute?"` → advice, commute, home→office
-- `"Will it rain tomorrow?"` → precipitation, tomorrow
-- `"Weather in atlanta"` → general, atlanta
-
----
-
-## Installation
-
-The skill is already installed in the Lucca workspace at `skills/weather/`.
-
-To use it from Python:
-
-```python
-import sys
-sys.path.insert(0, '/Users/openclaw/.openclaw/workspace/skills/weather')
-from skills.weather.skill import get_weather_chat, get_weather_briefing
-```
+`bin/morning_briefing.py` uses this Phase 2 briefing path first and falls back to wttr.in if the skill path fails.
 
 ---
 
 ## Advice Rules
 
 | Advice | Condition |
-|--------|----------|
-| �️ Umbrella | rain probability >30% OR current precipitation >0mm |
-| 🕶️ Sunglasses | UV index ≥6 AND clear/sunny (not overcast/rainy) |
-| 🧥 Warm jacket | feels-like <10°C |
-| 🧥 Light jacket | feels-like 10–15°C |
-| 💨 Wind caution | wind >40 km/h OR gusts >60 km/h |
-| 🔥 Heat caution | feels-like >30°C |
-| 🥶 Cold alert | feels-like <0°C |
+|---|---|
+| ☂️ Umbrella | rain probability > 30% or current precipitation > 0 mm |
+| 🕶️ Sunglasses | UV index >= 6 and not overcast/rainy/drizzly/thundery |
+| 🧥 Warm jacket | feels-like temperature < 10°C |
+| 🧥 Light jacket | feels-like temperature 10-15°C |
+| 💨 Wind caution | wind > 40 km/h or gusts > 60 km/h |
+| 🔥 Heat caution | feels-like temperature > 30°C |
+| 🥶 Cold caution | feels-like temperature < 0°C |
+| 🚨 Alerts | OpenWeatherMap alerts when available |
+
+Commute umbrella advice checks both home and office for rain risk during the morning window, default `08:30-11:30`.
+
+---
+
+## API Surface
+
+Phase 2 entry points:
+
+```python
+from skills.weather.skill import (
+    get_weather_chat,
+    get_weather_briefing,
+    get_weather_briefing_commute,
+)
+```
+
+Phase 1 API remains available:
+
+```python
+from skills.weather.weather_engine import get_weather, get_commute_windows, rain_in_window
+```
 
 ---
 
 ## File Index
 
 | File | Purpose |
-|------|---------|
-| `skill.py` | Entry point: `get_weather_chat()`, `get_weather_briefing()` |
-| `intent_classifier.py` | Intent classification (Gemma4 e4b + deterministic fallback) |
-| `advice_engine.py` | Advice rules + dual-location commute check |
+|---|---|
+| `skill.py` | Phase 2 chat and briefing entry points |
+| `intent_classifier.py` | Natural-language intent classifier and deterministic fallback |
+| `advice_engine.py` | Advice flags and commute umbrella logic |
 | `formatters/chat_formatter.py` | Emoji-rich chat output |
-| `formatters/briefing_formatter.py` | Compact briefing output |
-| `weather_engine.py` | Core: `get_weather()`, location resolution |
-| `weather_fetcher.py` | Dual-provider forecast fetch |
-| `geocoding.py` | Geocoding (OWM + Open-Meteo) |
-| `weather_models.py` | Data models (`WeatherData`, etc.) |
-| `location_registry.json` | Named locations + commute windows |
+| `formatters/briefing_formatter.py` | Compact briefing output, rain timing, tonight's low |
+| `weather_engine.py` | Phase 1 orchestration, registry resolution, commute windows |
+| `weather_fetcher.py` | OpenWeatherMap/Open-Meteo forecast fetch |
+| `geocoding.py` | OpenWeatherMap/Open-Meteo geocoding |
+| `weather_models.py` | Data models |
+| `location_registry.json` | Location aliases and commute windows |
 | `SKILL.md` | Full skill documentation |
-| `_meta.json` | Registration metadata |
+| `_meta.json` | Skill metadata |
 
 ---
 
-## Upgrade Notes
+## Publication Readiness
 
-### v1.1.0 → v1.2.0
+- v1.2.0 documented.
+- Zero-config Open-Meteo path documented.
+- Enhanced OpenWeatherMap path documented.
+- Intent classifier fallback chain documented as implemented.
+- Advice, commute, rain timing, tonight-low, chat, and briefing behaviours documented.
+- Morning briefing integration documented.
+- Phase 1 backwards compatibility preserved.
 
-Phase 2 adds:
-- **Intent classifier** — understands query type and commute signals
-- **Advice engine** — umbrella/jacket/sunglasses/wind/heat/cold rules
-- **Chat formatter** — emoji-rich conversational output
-- **Briefing formatter** — compact single-line with rain timing + tonight's low
-- **Dual-location commute** — checks both home and office for rain during commute windows
-- **Morning briefing integration** — replaces old `wttr.in` path in `bin/morning_briefing.py`
 
-v1.1.0 skill API (`weather_engine.py`) is fully preserved. `skill.py` provides the new Phase 2 interface.
+## Personal context shorthand
+
+- `WFH`, `working from home`, and `work from home` resolve to the configured `home` location for weather and walk advice.
