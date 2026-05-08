@@ -8,17 +8,25 @@ Parses natural-language weather queries to extract:
   - is_commute (bool)
 
 Model tiering (fallback chain):
-  1. GPT 5.5-mini (OpenAI) via direct API call
-  2. Claude Haiku (Anthropic) via direct API call
-  3. Ollama (local fallback) - llama3.2:3b or configurable via WEATHER_INTENT_MODEL
+  1. Configured OpenAI-compatible LLM endpoint
+  2. GPT 5.4-mini via OmniRoute (routed, not direct)
+  3. Claude Haiku via OmniRoute (routed, not direct)
+  4. Ollama (local fallback) - gemma4-e4b via local config, llama3.2:3b public default
 
 Fallback: Deterministic keyword/pattern rules (always available, no external deps)
 
 Environment variables:
-  OPENAI_API_KEY       - API key for GPT 5.5-mini (optional)
-  ANTHROPIC_API_KEY    - API key for Claude Haiku (optional)
-  OLLAMA_HOST          - Ollama endpoint (default: http://localhost:11434)
-  WEATHER_INTENT_MODEL - Ollama model fallback (default: llama3.2:3b)
+  WEATHER_INTENT_LLM_ENABLED         - Enable configured OpenAI-compatible LLM tier (true/false)
+  WEATHER_INTENT_LLM_BASE_URL        - OpenAI-compatible base URL ending in /v1
+  WEATHER_INTENT_LLM_MODEL           - Model ID for configured LLM tier
+  WEATHER_INTENT_LLM_API_KEY         - API key for configured LLM tier
+  WEATHER_INTENT_LLM_API_KEY_ENV     - Env var name containing the API key (default: WEATHER_INTENT_LLM_API_KEY)
+  WEATHER_INTENT_LLM_CONFIG_PATH     - Optional JSON config path
+  WEATHER_INTENT_LLM_TIMEOUT_SECONDS - Optional timeout override (default: 8)
+  WEATHER_INTENT_OMNIROUTE_MODEL      - OmniRoute model ID for intent classifier (default: omniroute/cx/gpt-5.4-mini)
+  WEATHER_OMNIROUTE_URL              - OmniRoute endpoint (default: http://127.0.0.1:20128/v1/chat/completions)
+  OLLAMA_HOST                        - Ollama endpoint (default: http://localhost:11434)
+  WEATHER_INTENT_MODEL               - Ollama model override via env var (env wins over local config)
 
 Usage:
     intent = classify_intent("Do I need an umbrella when I go to the office tomorrow?")
@@ -40,10 +48,58 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════════
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434") + "/api/generate"
-OLLAMA_MODEL = os.getenv("WEATHER_INTENT_MODEL", "llama3.2:3b")  # Modern, lightweight default
+
+# OmniRoute endpoint for intent classification (primary model routing)
+OMNIROUTE_URL = os.getenv("WEATHER_OMNIROUTE_URL", "http://127.0.0.1:20128/v1/chat/completions")
+def _get_ollama_model() -> str:
+    """Resolve Ollama model with precedence: env var > local config > public default.
+
+    Local config is loaded from intent_llm.local.json (or intent_llm.json), which is
+    ignored by Git and should contain real model names for this machine only.
+    """
+    # 1. Env var wins
+    env_model = os.getenv("WEATHER_INTENT_MODEL", "").strip()
+    if env_model:
+        return env_model
+
+    # 2. Local config file (ignored by Git — safe for real model names)
+    config_path = os.getenv(
+        "WEATHER_INTENT_LLM_CONFIG_PATH",
+        os.path.join(_package_dir(), "intent_llm.local.json"),
+    )
+    # Fall back to intent_llm.json if intent_llm.local.json doesn't exist
+    fallback_path = os.path.join(_package_dir(), "intent_llm.json")
+    if config_path == fallback_path and not os.path.exists(config_path):
+        # Try the .local variant first if the plain variant is missing
+        local_variant = os.path.join(_package_dir(), "intent_llm.local.json")
+        if os.path.exists(local_variant):
+            config_path = local_variant
+
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                file_config = json.load(f)
+            if isinstance(file_config, dict):
+                ollama_cfg = file_config.get("ollama", {})
+                if isinstance(ollama_cfg, dict):
+                    model = ollama_cfg.get("model", "").strip()
+                    if model:
+                        return model
+        except Exception as e:
+            logger.debug(f"Ollama model config load failed: {e}")
+
+    # 3. Public default (safe to commit)
+    return "llama3.2:3b"
+
+_INTENT_LLM_DEFAULT_CONFIG = {
+    "enabled": False,
+    "provider": "openai-compatible",
+    "base_url": "",
+    "model": "",
+    "api_key_env": "WEATHER_INTENT_LLM_API_KEY",
+    "timeout_seconds": 8.0,
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Intent dataclass
@@ -527,19 +583,128 @@ def _parse_intent_response(response: str) -> Optional[WeatherIntent]:
         return None
 
 
-# ── Tier 1: GPT 5.5-mini (OpenAI) ────────────────────────────────────────
+# ── Tier 1: Configured OpenAI-compatible LLM endpoint ─────────────────────
 
-def _call_openai(prompt: str, timeout: float = 8.0) -> Optional[str]:
-    """Call GPT 5.5-mini via OpenAI API. Returns None on failure."""
-    if not OPENAI_API_KEY:
-        logger.debug("OpenAI API key not set, skipping GPT 5.5-mini")
+def _truthy(value: object) -> bool:
+    """Return True for common string/boolean truthy values."""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _package_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_intent_llm_config() -> dict:
+    """Load optional OpenAI-compatible intent LLM configuration.
+
+    Environment variables override JSON config. The default state is disabled so
+    public installs never call a private endpoint unless explicitly configured.
+    """
+    config = dict(_INTENT_LLM_DEFAULT_CONFIG)
+    config_path = os.getenv(
+        "WEATHER_INTENT_LLM_CONFIG_PATH",
+        os.path.join(_package_dir(), "intent_llm.json"),
+    )
+
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                file_config = json.load(f)
+            if isinstance(file_config, dict):
+                config.update(file_config)
+        except Exception as e:
+            logger.debug(f"Intent LLM config load failed: {e}")
+
+    env_map = {
+        "enabled": "WEATHER_INTENT_LLM_ENABLED",
+        "base_url": "WEATHER_INTENT_LLM_BASE_URL",
+        "model": "WEATHER_INTENT_LLM_MODEL",
+        "api_key_env": "WEATHER_INTENT_LLM_API_KEY_ENV",
+        "timeout_seconds": "WEATHER_INTENT_LLM_TIMEOUT_SECONDS",
+    }
+    for key, env_name in env_map.items():
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            config[key] = value
+
+    if os.getenv("WEATHER_INTENT_LLM_API_KEY"):
+        config["api_key_env"] = "WEATHER_INTENT_LLM_API_KEY"
+
+    if isinstance(config.get("timeout_seconds"), str):
+        try:
+            config["timeout_seconds"] = float(config["timeout_seconds"])
+        except ValueError:
+            config["timeout_seconds"] = _INTENT_LLM_DEFAULT_CONFIG["timeout_seconds"]
+
+    config["enabled"] = _truthy(config.get("enabled"))
+    config["base_url"] = str(config.get("base_url") or "").rstrip("/")
+    config["model"] = str(config.get("model") or "")
+    config["api_key_env"] = str(config.get("api_key_env") or "WEATHER_INTENT_LLM_API_KEY")
+    return config
+
+
+def _call_configured_llm(prompt: str, timeout: float = 8.0) -> Optional[str]:
+    """Call a configured OpenAI-compatible chat completions endpoint."""
+    config = _load_intent_llm_config()
+    if not config.get("enabled"):
+        return None
+
+    base_url = config.get("base_url", "")
+    model = config.get("model", "")
+    api_key_env = config.get("api_key_env", "WEATHER_INTENT_LLM_API_KEY")
+    api_key = os.getenv(api_key_env, "")
+    request_timeout = float(config.get("timeout_seconds") or timeout)
+
+    if not base_url or not model or not api_key:
+        logger.debug("Configured intent LLM is enabled but missing base_url, model, or API key")
         return None
 
     import urllib.request
-    import urllib.error
 
     payload = {
-        "model": "gpt-5.5-mini",
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _INTENT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Query: {prompt}"}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 150,
+        "stream": False,
+    }
+
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.debug(f"Configured intent LLM classify failed: {e}")
+        return None
+
+
+# ── Tier 2: OmniRoute (routed GPT 5.4-mini) ─────────────────────────────────
+
+def _call_omniroute(prompt: str, timeout: float = 8.0) -> Optional[str]:
+    """Call GPT 5.4-mini via OmniRoute. Returns None on failure."""
+    import urllib.request
+
+    model = os.getenv("WEATHER_INTENT_OMNIROUTE_MODEL", "omniroute/cx/gpt-5.4-mini").strip()
+    if not model:
+        logger.debug("No OmniRoute model configured, skipping")
+        return None
+
+    payload = {
+        "model": model,
         "messages": [
             {"role": "system", "content": _INTENT_SYSTEM_PROMPT},
             {"role": "user", "content": f"Query: {prompt}"}
@@ -550,34 +715,31 @@ def _call_openai(prompt: str, timeout: float = 8.0) -> Optional[str]:
 
     try:
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            OMNIROUTE_URL,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-            },
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
             return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.debug(f"OpenAI intent classify failed: {e}")
+        logger.debug(f"OmniRoute intent classify failed: {e}")
         return None
 
 
-# ── Tier 2: Claude Haiku (Anthropic) ─────────────────────────────────────
+# ── Tier 3: Claude Haiku (Anthropic) ─────────────────────────────────────
 
 def _call_anthropic(prompt: str, timeout: float = 8.0) -> Optional[str]:
-    """Call Claude Haiku via Anthropic API. Returns None on failure."""
-    if not ANTHROPIC_API_KEY:
-        logger.debug("Anthropic API key not set, skipping Claude Haiku")
-        return None
-
+    """Call Claude Haiku via OmniRoute. Returns None on failure."""
     import urllib.request
 
+    model = os.getenv("WEATHER_INTENT_OMNIROUTE_MODEL", "omniroute/cx/gpt-5.4-mini").strip()
+    # Swap to Claude Haiku via OmniRoute if preferred
+    haiku_model = "omniroute/cc/claude-haiku-4.5-20251001"
+
     payload = {
-        "model": "claude-haiku-2025-11-07",  # Latest as of 2026-04-27
+        "model": haiku_model,
         "messages": [
             {"role": "user", "content": f"{_INTENT_SYSTEM_PROMPT}\n\nQuery: {prompt}"}
         ],
@@ -587,31 +749,28 @@ def _call_anthropic(prompt: str, timeout: float = 8.0) -> Optional[str]:
 
     try:
         req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
+            OMNIROUTE_URL,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-            },
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
-            return data["content"][0]["text"].strip()
+            return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.debug(f"Anthropic intent classify failed: {e}")
+        logger.debug(f"OmniRoute Claude Haiku classify failed: {e}")
         return None
 
 
-# ── Tier 3: Ollama (local fallback) ──────────────────────────────────────
+# ── Tier 4: Ollama (local fallback) ──────────────────────────────────────
 
 def _call_ollama(prompt: str, timeout: float = 8.0) -> Optional[str]:
     """Call Ollama for intent classification. Returns None on failure."""
     import urllib.request
 
+    model = _get_ollama_model()
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model,
         "prompt": f"{_INTENT_SYSTEM_PROMPT}\n\nQuery: {prompt}",
         "stream": False,
         "options": {"temperature": 0.1, "num_predict": 150},
@@ -640,37 +799,47 @@ def classify_intent(query: str) -> WeatherIntent:
     """
     Classify a weather query into structured intent.
 
-    Tries in order: GPT 5.5-mini → Claude Haiku → Ollama → deterministic.
+    Tries in order: configured OpenAI-compatible LLM endpoint → GPT 5.4-mini via OmniRoute → Claude Haiku via OmniRoute → Gemma4 via Ollama → deterministic.
 
     Args:
         query: natural-language weather query
 
     Returns:
         WeatherIntent with location, time_reference, intent_type, is_commute
+
+    No direct OpenAI or Anthropic API calls are made. All external model calls are routed
+    through OmniRoute (http://127.0.0.1:20128) unless a custom endpoint is explicitly
+    configured in intent_llm.local.json.
     """
     # Strip common prefixes
     clean_query = re.sub(r"^(weather|what's the weather|forecast)\s*", "", query.lower())
     clean_query = clean_query.strip("?.,!")
 
-    # Tier 1: GPT 5.5-mini
-    if OPENAI_API_KEY:
-        response = _call_openai(clean_query)
-        if response:
-            result = _parse_intent_response(response)
-            if result:
-                result.raw_query = query
-                return result
+    # Tier 1: configured OpenAI-compatible LLM endpoint
+    response = _call_configured_llm(clean_query)
+    if response:
+        result = _parse_intent_response(response)
+        if result:
+            result.raw_query = query
+            return result
 
-    # Tier 2: Claude Haiku
-    if ANTHROPIC_API_KEY:
-        response = _call_anthropic(clean_query)
-        if response:
-            result = _parse_intent_response(response)
-            if result:
-                result.raw_query = query
-                return result
+    # Tier 2: GPT 5.4-mini via OmniRoute
+    response = _call_omniroute(clean_query)
+    if response:
+        result = _parse_intent_response(response)
+        if result:
+            result.raw_query = query
+            return result
 
-    # Tier 3: Ollama (local fallback)
+    # Tier 3: Claude Haiku via OmniRoute
+    response = _call_anthropic(clean_query)
+    if response:
+        result = _parse_intent_response(response)
+        if result:
+            result.raw_query = query
+            return result
+
+    # Tier 4: Ollama (local fallback)
     response = _call_ollama(clean_query)
     if response:
         result = _parse_intent_response(response)
