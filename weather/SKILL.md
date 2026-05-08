@@ -196,16 +196,25 @@ Default windows:
 
 ### Chat formatter
 
-`format_chat()` returns emoji-rich, multi-line output for interactive queries:
+`format_chat()` returns emoji-rich, multi-line output for interactive weather queries. Emoji scan markers are a **weather-output requirement for Marcus**, not a global assistant reply-formatting preference.
+
+Weather chat output should prioritise precipitation/umbrella first where possible and use these scan markers consistently:
+
+- 🌧️ precipitation / rain probability
+- ☂️ umbrella decision
+- 🌡️ temperature
+- 💨 wind
+- 🚨 alerts
+- 🚶/🚇/🚗 commute or travel impact
 
 ```text
 📍 Home
+🌧️ Rain expected (100% chance today)
 🌡️ 9°C, feels like 8°C — Overcast clouds
-💧 Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 🧥 Jacket needed — feels like 7.52°C — cold
 ```
 
@@ -278,11 +287,11 @@ Query: `What's the weather?`
 ```text
 📍 Home
 🌡️ 9°C, feels like 8°C — Overcast clouds
-💧 Rain expected (100% chance today)
+🌧️ Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 🧥 Jacket needed — feels like 7.52°C — cold
 ```
 
@@ -304,11 +313,11 @@ Query: `Will it rain tomorrow?`
 ```text
 📍 Home
 🌡️ 9°C, feels like 8°C — Overcast clouds
-💧 Rain expected (100% chance today)
+🌧️ Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 ```
 
 ### 4. Advice query
@@ -331,23 +340,23 @@ Query: `Do I need an umbrella for my commute to work tomorrow morning?`
 ```text
 🏠 **Home**
 🌡️ 9°C, feels like 8°C — Overcast clouds
-💧 Rain expected (100% chance today)
+🌧️ Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 🧥 Jacket needed — feels like 7.52°C — cold
 
 🏢 **Office**
 🌡️ 9°C, feels like 7°C — Overcast clouds
-💧 Rain expected (100% chance today)
+🌧️ Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 🧥 Jacket needed — feels like 7.42°C — cold
 
-💡 **Commute advice:** Bring an umbrella — rain expected during morning commute
+☂️ **Commute umbrella:** Bring one — rain expected during morning commute
    • Rain expected at Home during morning commute (08:30–11:30)
    • Rain expected at Office during morning commute (08:30–11:30)
 ```

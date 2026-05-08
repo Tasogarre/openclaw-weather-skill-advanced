@@ -112,11 +112,11 @@ Example shape:
 ```text
 📍 Home
 🌡️ 9°C, feels like 8°C — Overcast clouds
-💧 Rain expected (100% chance today)
+🌧️ Rain expected (100% chance today)
 Today: High 18°C / Low 8°C
 Tomorrow: High 16°C / Low 8°C
 
-💡 Bring an umbrella — rain expected (100% chance)
+☂️ Umbrella: bring one — rain expected (100% chance)
 🧥 Jacket needed — feels like 7.52°C — cold
 ```
 
@@ -155,7 +155,7 @@ Example shape:
 🌡️ 9°C, feels like 7°C — Overcast clouds
 ...
 
-💡 **Commute advice:** Bring an umbrella — rain expected during morning commute
+☂️ **Commute umbrella:** Bring one — rain expected during morning commute
    • Rain expected at Home during morning commute (08:30–11:30)
    • Rain expected at Office during morning commute (08:30–11:30)
 ```

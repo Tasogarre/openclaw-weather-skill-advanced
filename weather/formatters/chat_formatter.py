@@ -42,12 +42,12 @@ def format_chat(
     Output format:
         📍 London (Home)
         🌡️ 9°C, feels like 9°C — Overcast clouds
-        💧 Rain expected during your morning commute (100% probability)
+        🌧️ Rain expected during your morning commute (100% probability)
 
         Today: High 18°C / Low 8°C
         Tomorrow: High 16°C / Low 10°C
 
-        💡 Bring an umbrella — rain likely during your commute
+        ☂️ Umbrella: bring one — rain likely during your commute
 
     Args:
         weather: WeatherData from get_weather()
@@ -79,7 +79,7 @@ def format_chat(
 
     # ── Precipitation callout ─────────────────────────────────
     if weather.today and weather.today.precip_probability >= 50:
-        lines.append(f"💧 Rain expected ({weather.today.precip_probability}% chance today)")
+        lines.append(f"🌧️ Rain expected ({weather.today.precip_probability}% chance today)")
 
     # ── Alerts (OWM only) ─────────────────────────────────────
     if weather.alerts:
@@ -123,9 +123,9 @@ def _format_advice(advice: WeatherAdvice) -> list[str]:
 
     # Umbrella decision: use a practical visual label, not generic decoration.
     if advice.umbrella_reasons:
-        result.append(f"☔ Umbrella: bring one — {advice.umbrella_reasons[0]}")
+        result.append(f"☂️ Umbrella: bring one — {advice.umbrella_reasons[0]}")
     elif not advice.alerts_text:
-        result.append("☔ Umbrella: not needed based on current forecast")
+        result.append("☂️ Umbrella: not needed based on current forecast")
 
     # Sunglasses
     if advice.sunglasses:

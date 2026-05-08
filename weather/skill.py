@@ -168,11 +168,11 @@ def _handle_travel_query(intent: WeatherIntent) -> str:
     reasons.extend(_travel_rain_reasons(destination_weather, "destination", intent, threshold=30))
     if reasons:
         lines.append("")
-        lines.append(f"☔ **Travel umbrella:** Bring one for {window_label}.")
+        lines.append(f"☂️ **Travel umbrella:** Bring one for {window_label}.")
         lines.extend(f"   • {reason}" for reason in reasons)
     else:
         lines.append("")
-        lines.append(f"☔ **Travel umbrella:** Not needed for {window_label} at origin or destination.")
+        lines.append(f"☂️ **Travel umbrella:** Not needed for {window_label} at origin or destination.")
 
     confirmations = [getattr(origin_weather, "registry_confirmation", None), getattr(destination_weather, "registry_confirmation", None)]
     confirmations = [c for c in confirmations if c]
@@ -320,12 +320,12 @@ def _handle_commute_query(intent: WeatherIntent) -> str:
     # Commute advice
     if needs_umbrella:
         lines.append("")
-        lines.append(f"☔ **Commute umbrella:** Bring one — rain expected during morning commute")
+        lines.append(f"☂️ **Commute umbrella:** Bring one — rain expected during morning commute")
         for reason in umbrella_reasons:
             lines.append(f"   • {reason}")
     else:
         lines.append("")
-        lines.append("☔ **Commute umbrella:** Not needed during morning commute")
+        lines.append("☂️ **Commute umbrella:** Not needed during morning commute")
 
     return "\n".join(lines)
 
