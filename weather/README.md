@@ -56,7 +56,14 @@ PY
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
 | `OPENWEATHERMAP_API_KEY` | no | unset | Enables OpenWeatherMap, UK postcode geocoding, and alerts |
-| `OPENAI_API_KEY` | no | unset | Enables GPT 5.5-mini intent classification |
+| `WEATHER_INTENT_LLM_ENABLED` | no | `false` | Enables a configured OpenAI-compatible intent classifier endpoint |
+| `WEATHER_INTENT_LLM_BASE_URL` | no | unset | OpenAI-compatible base URL ending in `/v1` |
+| `WEATHER_INTENT_LLM_MODEL` | no | unset | Model ID for the configured intent classifier endpoint |
+| `WEATHER_INTENT_LLM_API_KEY` | no | unset | API key for the configured intent classifier endpoint |
+| `WEATHER_INTENT_LLM_API_KEY_ENV` | no | `WEATHER_INTENT_LLM_API_KEY` | Alternate env var containing the configured endpoint API key |
+| `WEATHER_INTENT_LLM_CONFIG_PATH` | no | `intent_llm.json` beside this module | Optional ignored JSON config path; copy from `intent_llm.example.json` |
+| `WEATHER_INTENT_LLM_TIMEOUT_SECONDS` | no | `8` | Timeout for configured endpoint calls |
+| `OPENAI_API_KEY` | no | unset | Enables direct GPT 5.4-mini legacy fallback |
 | `ANTHROPIC_API_KEY` | no | unset | Enables Claude Haiku intent classification |
 | `OLLAMA_HOST` | no | `http://localhost:11434` | Ollama endpoint |
 | `WEATHER_INTENT_MODEL` | no | `llama3.2:3b` | Ollama classifier model |
@@ -67,16 +74,25 @@ PY
 
 No configuration is needed for the default Open-Meteo path.
 
+### Intent LLM local configuration
+
+For local endpoint configuration, copy `intent_llm.example.json` to ignored `intent_llm.json` or `intent_llm.local.json` beside this module and fill in your endpoint, model, and API-key env var. The committed example is disabled and uses placeholders only.
+
+
 ---
 
 ## Intent Classifier
 
 The classifier returns location, time reference, intent type, and commute/travel flags. It uses this fallback chain:
 
-1. GPT 5.5-mini when `OPENAI_API_KEY` is set.
-2. Claude Haiku when `ANTHROPIC_API_KEY` is set.
-3. Ollama using `WEATHER_INTENT_MODEL`, default `llama3.2:3b`.
-4. Deterministic keyword/pattern fallback, always available.
+
+1. Configured OpenAI-compatible LLM endpoint when enabled with `WEATHER_INTENT_LLM_*` or an ignored local config file.
+2. GPT 5.4-mini direct fallback when `OPENAI_API_KEY` is set.
+3. Claude Haiku when `ANTHROPIC_API_KEY` is set.
+4. Ollama using `WEATHER_INTENT_MODEL`, default `llama3.2:3b`.
+5. Deterministic keyword/pattern fallback, always available.
+
+Copy `intent_llm.example.json` to ignored `intent_llm.json` or `intent_llm.local.json` for local endpoint configuration. Do not commit real endpoints, model routing, or API-key names tied to a private environment.
 
 Recognised patterns include general forecasts, rain/snow questions, umbrella/clothing advice, commute-to-work queries, and a small set of travel-weather questions.
 
