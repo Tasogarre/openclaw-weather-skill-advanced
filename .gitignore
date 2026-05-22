@@ -20,3 +20,8 @@ weather/intent_llm.json
 weather/intent_llm.local.json
 weather/weather_settings.json
 weather/weather_settings.local.json
+
+# Weather skill private temporary travel itinerary; commit itinerary.example.json instead.
+weather/itinerary.json
+weather/itinerary.local.json
+weather/itinerary.private.json

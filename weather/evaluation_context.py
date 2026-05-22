@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Optional
 
 from .weather_models import WeatherData, HourlyPrecipitation
+from .itinerary import resolve_itinerary_location
 
 
 @dataclass
@@ -53,6 +54,10 @@ class EvaluationContext:
     needs_clarification: bool = False
     clarification_prompt: Optional[str] = None
     raw_query: str = ""
+    location_source: str = "default"  # explicit | itinerary | default | commute
+    itinerary_label: Optional[str] = None
+    itinerary_timezone: Optional[str] = None
+    itinerary_conflicts: list[str] = field(default_factory=list)
 
     # Legacy convenience accessors for backward compatibility with tests
     @property
@@ -129,6 +134,7 @@ def build_evaluation_context(
     from .weather_engine import get_commute_windows
 
     now = now or datetime.now(timezone.utc)
+    has_explicit_location = bool(intent.location and intent.location != "home")
     ctx = EvaluationContext(
         primary_location=intent.location or "home",
         is_commute=intent.is_commute,
@@ -139,7 +145,24 @@ def build_evaluation_context(
         time_reference=intent.time_reference,
         evaluation_date=_resolve_evaluation_date(intent.time_reference, now),
         raw_query=intent.raw_query,
+        location_source="explicit" if has_explicit_location else "default",
     )
+
+    if not has_explicit_location and not intent.is_commute:
+        resolution = resolve_itinerary_location(ctx.evaluation_date or now.date())
+        if resolution:
+            if resolution.has_conflict:
+                ctx.needs_clarification = True
+                ctx.itinerary_conflicts = [entry.location for entry in resolution.conflict_entries]
+                options = ", ".join(ctx.itinerary_conflicts)
+                ctx.clarification_prompt = f"📍 I have multiple possible locations for {ctx.evaluation_date}: {options}. Which should I use?"
+                return ctx
+            if resolution.entry:
+                ctx.primary_location = resolution.entry.location
+                ctx.primary_display = resolution.entry.location
+                ctx.location_source = "itinerary"
+                ctx.itinerary_label = resolution.entry.label
+                ctx.itinerary_timezone = resolution.entry.timezone
 
     # ── Clarification state ───────────────────────────────────
     if getattr(intent, 'needs_time_clarify', False) and intent.is_travel and not intent.is_best_time_request:
@@ -150,6 +173,7 @@ def build_evaluation_context(
 
     # ── Commute windows ───────────────────────────────────────
     if intent.is_commute:
+        ctx.location_source = "commute"
         windows_cfg = default_commute_windows or get_commute_windows()
         direction = detect_commute_direction(intent.raw_query)
         window_cfg = windows_cfg.get(direction, {"start": "08:30", "end": "11:30"})

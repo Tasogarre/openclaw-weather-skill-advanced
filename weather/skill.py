@@ -109,7 +109,7 @@ def get_weather_chat(query: str, departure_time: Optional[str] = None) -> str:
         # Step 5: range forecast surfaces
         range_mode = _detect_forecast_range_mode(query)
         if range_mode:
-            return _handle_forecast_range_query(intent, range_mode)
+            return _handle_forecast_range_query(intent, range_mode, ctx)
 
         # Step 6: best-time optimization. Commute timing is handled separately
         # from outing/destination timing because it must score both Home and Office.
@@ -127,7 +127,7 @@ def get_weather_chat(query: str, departure_time: Optional[str] = None) -> str:
             return _handle_travel_query(intent, ctx)
 
         # Step 8: single location query
-        return _handle_single_location_query(intent, intent.location)
+        return _handle_single_location_query(intent, ctx.primary_location, ctx)
 
     except LocationNotFoundError:
         return f"❓ Couldn't find that location — try a city name like 'London' or 'Atlanta'."
@@ -170,19 +170,30 @@ def _display_for_location(location_input: str, fallback: str) -> str:
         return fallback
 
 
-def _handle_forecast_range_query(intent: WeatherIntent, mode: str) -> str:
-    location_input = intent.location or "home"
+def _context_location_note(ctx: Optional[EvaluationContext]) -> str:
+    if not ctx or ctx.location_source != "itinerary":
+        return ""
+    label = ctx.primary_display or ctx.primary_location
+    suffix = f" ({ctx.itinerary_label})" if ctx.itinerary_label else ""
+    return f"📍 Using travel context: {label}{suffix}"
+
+
+def _handle_forecast_range_query(intent: WeatherIntent, mode: str, ctx: Optional[EvaluationContext] = None) -> str:
+    location_input = (ctx.primary_location if ctx else None) or intent.location or "home"
     weather = get_weather(location_input)
     display = _display_for_location(location_input, weather.location_label)
 
     output = format_forecast_range(weather, mode=mode, location_display=display)
+    note = _context_location_note(ctx)
+    if note:
+        output = f"{note}\n\n{output}"
     confirmation = getattr(weather, "registry_confirmation", None)
     if confirmation:
         output += f"\n\n{confirmation}"
     return output
 
 
-def _handle_single_location_query(intent: WeatherIntent, location_input: str) -> str:
+def _handle_single_location_query(intent: WeatherIntent, location_input: str, ctx: Optional[EvaluationContext] = None) -> str:
     """Handle a single-location weather query."""
     weather = get_weather(location_input)
     advice = advice_for_location(weather)
@@ -190,6 +201,9 @@ def _handle_single_location_query(intent: WeatherIntent, location_input: str) ->
     display = _display_for_location(location_input, weather.location_label)
 
     output = format_chat(weather, advice, location_display=display)
+    note = _context_location_note(ctx)
+    if note:
+        output = f"{note}\n\n{output}"
     confirmation = getattr(weather, "registry_confirmation", None)
     if confirmation:
         output += f"\n\n{confirmation}"
@@ -516,6 +530,27 @@ def get_weather_briefing(location: str = "home") -> str:
         return f"**Weather:** location not found ({location})"
     except WeatherEngineError as e:
         return f"**Weather:** unavailable — {e}"
+    except Exception as e:
+        return f"**Weather:** check failed ({e})"
+
+
+def get_weather_briefing_for_today(now: Optional[datetime] = None) -> str:
+    """Return today's briefing using active itinerary location when present.
+
+    This is the safe default for scheduled morning briefing: travel/current
+    location context wins for the current date, otherwise it falls back to home.
+    Commute remains opt-in via get_weather_briefing_commute().
+    """
+    try:
+        intent = WeatherIntent(location="home", time_reference="today", intent_type="general", raw_query="morning briefing weather")
+        ctx = build_evaluation_context(intent, now=now)
+        if ctx.needs_clarification:
+            return ctx.clarification_prompt or "**Weather:** needs location clarification"
+        output = get_weather_briefing(location=ctx.primary_location)
+        note = _context_location_note(ctx)
+        if note:
+            return f"{note}\n{output}"
+        return output
     except Exception as e:
         return f"**Weather:** check failed ({e})"
 

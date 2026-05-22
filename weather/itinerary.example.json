@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "entries": [
+    {
+      "label": "example_trip_city",
+      "location": "Edinburgh, UK",
+      "start": "2026-05-01",
+      "end": "2026-05-03",
+      "timezone": "Europe/London",
+      "priority": 0,
+      "source": "example"
+    }
+  ]
+}
