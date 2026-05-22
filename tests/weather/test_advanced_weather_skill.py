@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -319,3 +319,437 @@ def test_skill_uses_extracted_free_text_location(monkeypatch):
 
     assert calls == ["Mayfair"]
     assert "Mayfair" in result
+
+
+def test_chat_formatter_next_7_days_uses_daily_forecast_horizon(monkeypatch):
+    from datetime import date, timedelta
+
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    start = date(2026, 5, 18)
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=start + timedelta(days=i),
+            high=18 + i,
+            low=10 + i,
+            condition="Light rain" if i == 2 else "Clear sky",
+            precip_probability=70 if i == 2 else 10,
+        )
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    result = format_forecast_range(weather, mode="next_7_days", location_display="Home")
+
+    assert "📅 **Next 7 days forecast**" in result
+    assert result.count("High") == 7
+    assert "Mon 25 May" not in result
+    assert "🌧️ Wettest: Wed 20 May (70% rain chance)" in result
+
+
+def test_chat_formatter_next_10_days_uses_full_horizon():
+    from datetime import date, timedelta
+
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    start = date(2026, 5, 18)
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(date=start + timedelta(days=i), high=18, low=10, condition="Clear sky", precip_probability=0)
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    result = format_forecast_range(weather, mode="next_10_days", location_display="Home")
+
+    assert "📅 **Next 10 days forecast**" in result
+    assert result.count("High") == 10
+    assert "Wed 27 May" in result
+
+
+def test_rest_of_week_respects_monday_week_start():
+    from datetime import date, timedelta
+
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    start = date(2026, 5, 19)  # Tuesday
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(date=start + timedelta(days=i), high=18, low=10, condition="Clear sky", precip_probability=0)
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    result = format_forecast_range(weather, mode="rest_of_week", location_display="Home", week_start_day=0)
+
+    assert "📅 **Rest of week forecast**" in result
+    assert result.count("High") == 6
+    assert "Sun 24 May" in result
+    assert "Mon 25 May" not in result
+
+
+def test_skill_routes_next_10_days_query(monkeypatch):
+    calls: list[str] = []
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [weather.today] * 10
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="next-week", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("next 10 days forecast")
+
+    assert calls == ["home"]
+    assert "📅 **Next 10 days forecast**" in result
+
+
+# ── U1: Forecast range detection ─────────────────────────────────────────────
+
+
+def _dummy_weather(label: str) -> WeatherData:
+    """Minimal weather fixture matching existing test fixtures."""
+    today_dt = date.today()
+    return WeatherData(
+        location_label=label,
+        latitude=51.5,
+        longitude=-0.1,
+        timezone="Europe/London",
+        current=CurrentConditions(
+            temperature=15.0,
+            feels_like=14.0,
+            condition="Clear sky",
+            condition_code=0,
+        ),
+        today=DailyForecast(
+            date=today_dt,
+            high=18.0,
+            low=10.0,
+            condition="Clear sky",
+            condition_code=0,
+            precip_probability=10,
+        ),
+        tomorrow=DailyForecast(
+            date=today_dt + timedelta(days=1),
+            high=19.0,
+            low=11.0,
+            condition="Partly cloudy",
+            condition_code=2,
+            precip_probability=20,
+        ),
+        day_after=DailyForecast(
+            date=today_dt + timedelta(days=2),
+            high=20.0,
+            low=12.0,
+            condition="Light rain",
+            condition_code=61,
+            precip_probability=60,
+        ),
+    )
+
+
+def test_skill_routes_next_14_days_query(monkeypatch):
+    calls: list[str] = []
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=date.today() + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(14)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="next-week", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("next 14 days forecast")
+
+    assert calls == ["home"]
+    assert "📅 **Next 14 days forecast**" in result
+    assert result.count("High") == 14
+
+
+def test_skill_routes_next_2_weeks_query(monkeypatch):
+    calls: list[str] = []
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=date.today() + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(14)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="general", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("What does the weather look like for the next 2 weeks?")
+
+    assert "📅 **Next 14 days forecast**" in result
+    assert result.count("High") == 14
+
+
+def test_skill_routes_rest_of_week_query(monkeypatch):
+    calls: list[str] = []
+    today = date.today()
+    weather = _dummy_weather("Home")
+    # Provide 10 days so we can check only week-bound days are selected
+    weather.daily_forecast = [
+        DailyForecast(
+            date=today + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="today", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("What does the weather look like for the rest of the week?")
+
+    assert "📅 **Rest of week forecast**" in result
+    # With Monday start (default), rest of week = today through Sunday
+    # Count should be limited to the remaining days in the week, not all 10
+
+
+def test_skill_routes_this_week_query(monkeypatch):
+    calls: list[str] = []
+    weather = _dummy_weather("Home")
+    today = date.today()
+    weather.daily_forecast = [
+        DailyForecast(
+            date=today + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="today", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("What does the weather look like this week?")
+
+    assert "📅 **Rest of week forecast**" in result
+
+
+def test_skill_routes_next_week_query(monkeypatch):
+    calls: list[str] = []
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=date.today() + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(14)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    monkeypatch.setattr(
+        "weather.skill.classify_intent",
+        lambda _: WeatherIntent(location="home", time_reference="next-week", intent_type="general"),
+    )
+    monkeypatch.setattr("weather.skill.get_weather", lambda loc: calls.append(loc) or weather)
+    monkeypatch.setattr("weather.skill.resolve_location", lambda loc: ({"display_name": "Home"}, type("Geo", (), {"name": loc})()))
+
+    result = get_weather_chat("What does the weather look like for the next week?")
+
+    assert "📅 **Next 7 days forecast**" in result
+    assert result.count("High") == 7
+
+
+# ── U2: Formatter 14-day support ──────────────────────────────────────────────
+
+
+def test_chat_formatter_next_14_days_uses_full_horizon():
+    from datetime import date, timedelta
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    today = date.today()
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=today + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(14)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    result = format_forecast_range(weather, mode="next_14_days", location_display="Home")
+
+    assert "📅 **Next 14 days forecast**" in result
+    assert result.count("High") == 14
+
+
+def test_chat_formatter_next_14_days_provider_note_when_short(monkeypatch):
+    from datetime import date, timedelta
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    today = date.today()
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=today + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(7)  # only 7 days returned
+    ]
+    weather.sync_legacy_daily_fields()
+
+    result = format_forecast_range(weather, mode="next_14_days", location_display="Home")
+
+    assert "📅 **Next 14 days forecast**" in result
+    assert result.count("High") == 7
+    assert "Provider returned 7 daily forecasts" in result
+
+
+# ── U3: Week boundary configurability ────────────────────────────────────────
+
+
+def test_rest_of_week_with_sunday_start_gives_6_days(monkeypatch):
+    from datetime import date, timedelta
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    start = date(2026, 5, 19)  # Tuesday
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=start + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    # Sunday as week start (index 6): Tue 19 → Sat 23 = 5 days (until day before next Sunday)
+    result = format_forecast_range(weather, mode="rest_of_week", location_display="Home", week_start_day=6)
+
+    assert "📅 **Rest of week forecast**" in result
+    assert result.count("High") == 5
+    assert "Sat 23 May" in result
+    assert "Sun 24 May" not in result
+
+
+def test_rest_of_week_with_monday_start_gives_6_days_from_tuesday(monkeypatch):
+    from datetime import date, timedelta
+    from weather.formatters.chat_formatter import format_forecast_range
+
+    start = date(2026, 5, 19)  # Tuesday
+    weather = _dummy_weather("Home")
+    weather.daily_forecast = [
+        DailyForecast(
+            date=start + timedelta(days=i),
+            high=18,
+            low=10,
+            condition="Clear sky",
+            precip_probability=0,
+        )
+        for i in range(10)
+    ]
+    weather.sync_legacy_daily_fields()
+
+    # Monday as week start (index 0): Tue 19 → Sun 24 = 6 days
+    result = format_forecast_range(weather, mode="rest_of_week", location_display="Home", week_start_day=0)
+
+    assert "📅 **Rest of week forecast**" in result
+    assert result.count("High") == 6
+    assert "Sun 24 May" in result
+    assert "Mon 25 May" not in result
+
+
+# ── U4: Forecast horizon configuration ────────────────────────────────────────
+
+
+def test_forecast_days_default_is_14(monkeypatch):
+    monkeypatch.delenv("WEATHER_FORECAST_DAYS", raising=False)
+    from weather.weather_settings import get_forecast_days
+    assert get_forecast_days() == 14
+
+
+def test_forecast_days_env_override(monkeypatch):
+    monkeypatch.setenv("WEATHER_FORECAST_DAYS", "7")
+    from weather.weather_settings import get_forecast_days
+    assert get_forecast_days() == 7
+
+
+def test_forecast_days_clamped_to_14(monkeypatch):
+    monkeypatch.setenv("WEATHER_FORECAST_DAYS", "30")
+    from weather.weather_settings import get_forecast_days
+    assert get_forecast_days() == 14
+
+
+def test_forecast_days_invalid_env_falls_back_to_14(monkeypatch):
+    monkeypatch.setenv("WEATHER_FORECAST_DAYS", "bad")
+    from weather.weather_settings import get_forecast_days
+    assert get_forecast_days() == 14
+
+
+def test_forecast_days_clamped_minimum_1(monkeypatch):
+    monkeypatch.setenv("WEATHER_FORECAST_DAYS", "0")
+    from weather.weather_settings import get_forecast_days
+    assert get_forecast_days() == 1
+
+
+def test_week_start_day_setting_monday_default(monkeypatch):
+    monkeypatch.delenv("WEATHER_WEEK_START_DAY", raising=False)
+    from weather.weather_settings import get_week_start_day
+    assert get_week_start_day() == 0  # Monday
+
+
+def test_week_start_day_setting_sunday(monkeypatch):
+    monkeypatch.setenv("WEATHER_WEEK_START_DAY", "sunday")
+    from weather.weather_settings import get_week_start_day
+    assert get_week_start_day() == 6
+
+
+def test_week_start_day_setting_invalid_falls_back_to_monday(monkeypatch):
+    monkeypatch.setenv("WEATHER_WEEK_START_DAY", "notaday")
+    from weather.weather_settings import get_week_start_day
+    assert get_week_start_day() == 0

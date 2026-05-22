@@ -95,7 +95,7 @@ def test_dynamic_location_write_is_atomic_and_uses_selected_path(tmp_path):
     confirmation = add_dynamic_location("Tribe Waterloo", GeoResult("Tribe Waterloo", 51.5, -0.11, "GB"), path=path)
 
     data = load_registry(path)
-    assert confirmation == "I’ve saved Tribe Waterloo for next time."
+    assert "saved Tribe Waterloo for next time" in confirmation
     assert "tribe_waterloo" in data["locations"]
     assert data["locations"]["tribe_waterloo"]["lookup"]["latitude"] == 51.5
     assert not list(tmp_path.glob("*.tmp"))

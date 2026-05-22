@@ -40,7 +40,7 @@ def test_successful_unknown_weather_writes_dynamic_record(tmp_path, monkeypatch)
 
     data = load_registry(path)
     assert "tribe_waterloo" in data["locations"]
-    assert getattr(weather, "registry_confirmation") == "I’ve saved Tribe Waterloo for next time."
+    assert "saved Tribe Waterloo for next time" in getattr(weather, "registry_confirmation", "")
 
 
 def test_failed_forecast_does_not_write_dynamic_record(tmp_path, monkeypatch):

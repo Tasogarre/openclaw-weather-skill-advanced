@@ -40,7 +40,10 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Callable
+
+_SKILL_DIR = Path(__file__).parent
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +122,8 @@ class WeatherIntent:
     travel_window_end: Optional[str] = None  # ISO datetime
     travel_window_label: Optional[str] = None  # HH:MM–HH:MM
     needs_time_clarify: bool = False  # True when travel query has underspecified time
+    # Clarification state for multi-turn conversations
+    clarification_state: str = "none"  # none | needs_time | needs_destination | needs_locations
     # Best-time outing fields (U7)
     is_best_time_request: bool = False
     target_date: Optional[str] = None  # YYYY-MM-DD or today/tomorrow/sunday etc.
@@ -148,9 +153,12 @@ _INTENT_PATTERNS = {
     "precipitation": [r"\brain\b", r"\bsnow\b", r"\bwet\b", r"\bdrizzle\b"],
     "advice": [r"\bneed\b.*\bumbrella\b", r"\bshould i\b", r"\bdo i need\b",
                r"\bbring\b", r"\bpack\b", r"\bwear\b"],
-    "commute": [r"\bcommute\b", r"\bgoing to work\b", r"\btraveling to work\b",
+    "commute": [r"\bcommute\b", r"\bgoing to work\b", r"\bgoing in\b", r"\bgo(?:ing)? into work\b",
+                r"\bgo(?:ing)? in to work\b", r"\btraveling to work\b",
                 r"\bdriving to work\b", r"\bwalking to work\b", r"\bto the office\b",
-                r"\binto the office\b", r"\bto work\b",
+                r"\bto my office\b", r"\binto the office\b", r"\binto my office\b",
+                r"\bgo(?:ing)? into (?:the |my )?office\b", r"\bto work\b",
+                r"\boffice commute\b", r"\bwork commute\b",
                 r"\bon my way (?:in|into)(?:\s+(?:work|the office|office))?\b",
                 r"\bon my way to (?:work|the office|office)\b"],
     "travel_weather": [r"\bfor a train\b", r"\bto catch a\b", r"\btrain to\b",
@@ -164,6 +172,8 @@ _TRAVEL_KEYWORDS = [
     r"\bgotta\s+go\s+to\b", r"\bgotta\s+head\s+to\b",
     r"\bto (?:the )?(?:station|airport|platform|stop)\b",
     r"\bhave\s+gotta\s+go\s+to\b",
+    r"\bcoming home from\b", r"\bgoing from\b",
+    r"\bheading home\b", r"\bheaded home\b",
 ]
 
 # Time patterns that are too vague for travel queries without a specific time
@@ -171,9 +181,11 @@ _BEST_TIME_PATTERNS = [
     r"\bwhen is the weather best",
     r"\bwhen is the (?:weather )?best time",
     r"\bwhen is the weather the best",
-    r"\bbest time.*(?:weather|walk|go|visit|head)",
-    r"\bbest time to(?: walk| go| visit| head)",
-    r"\bwhat.*best.*time.*(?:weather|walk|go|visit)",
+    r"\bbest time.*(?:weather|walk|go|visit|head|leave|commute|office|work)",
+    r"\bbest time to(?: walk| go| visit| head| leave| commute)",
+    r"\bwhat.*best.*time.*(?:weather|walk|go|visit|leave|commute|office|work)",
+    r"\bwhen should i (?:leave|go|head|commute)",
+    r"\bwhat time should i (?:leave|go|head|commute)",
 ]
 
 # Time patterns that are too vague for travel queries without a specific time
@@ -182,21 +194,28 @@ _VAGUE_TIME_PATTERNS = [
     r"\btonight\b", r"\blater\b",
 ]
 
-# Places with known Sunday market/special hours — hour range encoded as (start, end)
-_SPECIAL_PLACE_WINDOWS = {
-    "columbia flower market": (8, 15),
-    "columbia road flower market": (8, 15),
-}
+# Places with known Sunday market/special hours — loaded from best_time_windows.json
+try:
+    _btc = json.loads((_SKILL_DIR / "best_time_windows.json").read_text(encoding="utf-8"))
+    _SPECIAL_PLACE_WINDOWS = {k: tuple(v) for k, v in _btc["special_places"].items()}
+    _GENERIC_OUTING_WINDOW: tuple[int, int] = tuple(_btc["generic_outing_window"])  # type: ignore[assignment]
+except FileNotFoundError:
+    _SPECIAL_PLACE_WINDOWS = {
+        "columbia flower market": (8, 15),
+        "columbia road flower market": (8, 15),
+    }
+    _GENERIC_OUTING_WINDOW = (9, 18)
+except (KeyError, ValueError) as e:
+    logger.warning(f"best_time_windows.json malformed: {e}; using hardcoded defaults")
+    _SPECIAL_PLACE_WINDOWS = {
+        "columbia flower market": (8, 15),
+        "columbia road flower market": (8, 15),
+    }
+    _GENERIC_OUTING_WINDOW = (9, 18)
 
-# Date name to YYYY-MM-DD (relative to 2026-05-04 Monday)
-_DATE_NAME_MAP = {
-    "sunday": "2026-05-03",
-    "saturday": "2026-05-02",
-    "friday": "2026-05-01",
-    "thursday": "2026-04-30",
-    "wednesday": "2026-04-29",
-    "tuesday": "2026-04-28",
-    "monday": "2026-05-04",
+_WEEKDAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
 }
 
 
@@ -212,9 +231,11 @@ def _parse_date_reference(query: str) -> str:
         return "today"
     if re.search(r"\btomorrow\b", q):
         return "tomorrow"
-    for day_name, date_str in _DATE_NAME_MAP.items():
+    today = datetime.now().date()
+    for day_name, target_weekday in _WEEKDAY_NAMES.items():
         if re.search(r"\b" + day_name + r"\b", q):
-            return date_str
+            days_ahead = (target_weekday - today.weekday()) % 7
+            return (today + timedelta(days=days_ahead)).isoformat()
     return "today"  # default for best-time
 
 
@@ -236,14 +257,43 @@ def _get_best_time_candidate_window(destination: Optional[str], date_ref: str, n
                 return (max(s, next_hour), e)
             return (s, e)
     # Generic outing window
-    generic_start = 9
-    generic_end = 18
+    generic_start, generic_end = _GENERIC_OUTING_WINDOW
     if now is not None and date_ref == "today":
         next_hour = now.hour + 1
         if next_hour >= generic_end:
             return (0, 0)
         return (max(generic_start, next_hour), generic_end)
     return (generic_start, generic_end)
+
+
+def _extract_best_time_destination(query: str) -> Optional[str]:
+    """Extract destination for best-time queries without requiring travel intent."""
+    for pat in [r"\bwalk to\s+([^,?]+)", r"\bgo visit\s+([^,?]+)", r"\bgo to\s+([^,?]+)", r"\bvisit\s+([^,?]+)", r"\bhead to\s+([^,?]+)"]:
+        m = re.search(pat, query, flags=re.IGNORECASE)
+        if m:
+            dest_candidate = _clean_extracted_place(_strip_time_suffix(m.group(1).strip(" ?,.")))
+            if dest_candidate and len(dest_candidate) >= 2:
+                return dest_candidate
+    return None
+
+
+def _enrich_intent_from_query(result: WeatherIntent, query: str) -> None:
+    """Populate best-time fields that LLM tiers omit from their JSON responses.
+
+    Mutates result in place.
+    """
+    if not _is_best_time_request(query):
+        return
+    result.is_best_time_request = True
+    extracted_destination = _extract_best_time_destination(query)
+    if extracted_destination:
+        result.destination = extracted_destination
+        result.location = extracted_destination
+    target_date = _parse_date_reference(query)
+    result.target_date = target_date
+    start, end = _get_best_time_candidate_window(result.destination, target_date)
+    result.candidate_window_start = start
+    result.candidate_window_end = end
 
 
 def _deterministic_classify(query: str) -> WeatherIntent:
@@ -260,30 +310,16 @@ def _deterministic_classify(query: str) -> WeatherIntent:
     # For best-time, extract destination even if not a travel query
     destination = _extract_travel_destination(query) if is_travel else None
     if is_best_time and not destination:
-        # Try best-time-specific extraction
-        for pat in [r"\bwalk to\s+([^,?]+)", r"\bgo to\s+([^,?]+)", r"\bvisit\s+([^,?]+)", r"\bhead to\s+([^,?]+)"]:
-            m = re.search(pat, query, flags=re.IGNORECASE)
-            if m:
-                dest_candidate = _clean_extracted_place(m.group(1).strip(" ?,."))
-                if dest_candidate and len(dest_candidate) >= 2:
-                    destination = dest_candidate
-                    break
+        destination = _extract_best_time_destination(query)
     if is_best_time and not destination:
         destination = _extract_location(query)
     location = destination or _extract_location(query)
-    origin = _extract_origin(query) if is_travel else None
+    origin = _extract_origin(query) if (is_travel or is_commute) else None
+    # Default origin for travel queries when no explicit origin found
+    if is_travel and origin is None:
+        origin = "home"
     departure_time = _extract_departure_time(query) if is_travel or _has_specific_time(query) else None
     window = build_travel_window(time_ref, departure_time) if departure_time else (None, None, None)
-    candidate_start, candidate_end = (0, 0)
-    if is_best_time:
-        candidate_start, candidate_end = _get_best_time_candidate_window(destination, target_date or "today")
-    origin = _extract_origin(query) if is_travel else None
-    departure_time = _extract_departure_time(query) if is_travel or _has_specific_time(query) else None
-    window = build_travel_window(time_ref, departure_time) if departure_time else (None, None, None)
-    needs_time_clarify = _needs_time_clarification(query) if is_travel else False
-
-    is_best_time = _is_best_time_request(query)
-    target_date = _parse_date_reference(query) if is_best_time else None
     candidate_start, candidate_end = (0, 0)
     if is_best_time:
         candidate_start, candidate_end = _get_best_time_candidate_window(destination, target_date or "today")
@@ -292,6 +328,14 @@ def _deterministic_classify(query: str) -> WeatherIntent:
     # Override intent_type for travel queries
     if is_travel and intent not in ("advice", "precipitation"):
         intent = "travel_weather"
+
+    # Determine clarification state
+    needs_clarify = _needs_time_clarification(query, is_best_time=is_best_time)
+    clarification_state = "none"
+    if needs_clarify:
+        clarification_state = "needs_time"
+    elif is_travel and not destination:
+        clarification_state = "needs_destination"
 
     return WeatherIntent(
         location=location,
@@ -305,7 +349,8 @@ def _deterministic_classify(query: str) -> WeatherIntent:
         travel_window_start=window[0],
         travel_window_end=window[1],
         travel_window_label=window[2],
-        needs_time_clarify=_needs_time_clarification(query, is_best_time=is_best_time),
+        needs_time_clarify=needs_clarify,
+        clarification_state=clarification_state,
         is_best_time_request=is_best_time,
         target_date=target_date,
         candidate_window_start=candidate_start,
@@ -369,6 +414,11 @@ def _extract_time(query: str) -> str:
         for pattern in patterns:
             if re.search(pattern, q):
                 return time_ref
+    today = datetime.now().date()
+    for day_name, target_weekday in _WEEKDAY_NAMES.items():
+        if re.search(r"\b" + day_name + r"\b", q):
+            days_ahead = (target_weekday - today.weekday()) % 7
+            return (today + timedelta(days=days_ahead)).isoformat()
     return "now"
 
 
@@ -389,11 +439,16 @@ def _is_commute_query(query: str) -> bool:
     """Detect commute-related queries."""
     q = query.lower()
     commute_keywords = [
-        r"\bcommute\b", r"\bgoing to work\b", r"\btraveling to work\b",
+        r"\bcommute\b", r"\bgoing to work\b", r"\bgoing in\b", r"\bgo(?:ing)? into work\b",
+        r"\bgo(?:ing)? in to work\b", r"\btraveling to work\b",
         r"\bdriving to work\b", r"\bwalking to work\b",
-        r"\bto the office\b", r"\binto the office\b", r"\bto work\b",
+        r"\bto the office\b", r"\bto my office\b", r"\binto the office\b",
+        r"\binto my office\b", r"\bgo(?:ing)? into (?:the |my )?office\b",
+        r"\bto work\b", r"\boffice commute\b", r"\bwork commute\b",
         r"\bon my way (?:in|into)(?:\s+(?:work|the office|office))?\b",
         r"\bon my way to (?:work|the office|office)\b",
+        r"\bheading home from (?:the )?(?:office|work)\b",
+        r"\bcoming home from (?:the )?(?:office|work)\b",
     ]
     return any(re.search(kw, q) for kw in commute_keywords)
 
@@ -403,6 +458,12 @@ def _is_travel_query(query: str) -> bool:
     q = query.lower()
     if re.search(r"\b(?:wfh|working from home|work from home)\b", q) and re.search(r"\bgo for a walk\b", q):
         return False
+    # "coming home from X" is travel (origin=X, destination=home)
+    if re.search(r"\bcoming\s+home\s+from\b", q):
+        return True
+    # "going/heading from X to Y" is travel
+    if re.search(r"\b(?:going|heading|headed)\s+from\b", q):
+        return True
     # Must have a travel keyword
     has_travel_kw = any(re.search(kw, q) for kw in _TRAVEL_KEYWORDS)
     if not has_travel_kw:
@@ -417,7 +478,27 @@ def _extract_travel_destination(query: str) -> Optional[str]:
     """
     Extract the destination from a travel query.
     Looks for 'to [place]' patterns and stops before time/preposition words.
+
+    Also handles "coming home from X" where destination is home.
     """
+    q = query.lower()
+
+    # "coming home from X" → destination is home
+    if re.search(r"\bcoming\s+home\b", q):
+        return "home"
+
+    # "from X to Y" → destination is Y
+    m = re.search(r"\bto\s+([a-z][a-z0-9'&.\-\s]{1,40}?)(?=\s+(?:from|at|on|by|for|tomorrow|today|tonight|morning|afternoon|evening|night)\b|[?.!,;:]|$)", q, flags=re.IGNORECASE)
+    if m:
+        cleaned = _clean_extracted_place(_strip_time_suffix(m.group(1)))
+        if cleaned and len(cleaned) >= 2:
+            if cleaned.lower() in ("work", "the office", "my office", "office"):
+                return "office"
+            if cleaned.lower() in ("home", "my place"):
+                return "home"
+            return cleaned
+
+    # Fallback: generic "to [place]" pattern
     match = re.search(
         r"\bto\s+([a-z][a-z0-9'&.\-\s]{1,80}?)(?=\s+(?:from|at|on|by|for|tomorrow|today|tonight|morning|afternoon|evening|night)\b|[?.!,;:]|$)",
         query,
@@ -426,18 +507,52 @@ def _extract_travel_destination(query: str) -> Optional[str]:
     if match:
         cleaned = _clean_extracted_place(_strip_time_suffix(match.group(1)))
         if cleaned and len(cleaned) >= 2:
+            if cleaned.lower() in ("work", "the office", "my office", "office"):
+                return "office"
+            if cleaned.lower() in ("home", "my place"):
+                return "home"
             return cleaned
     return None
 
 
 
-def _extract_origin(query: str) -> str:
+def _extract_origin(query: str) -> Optional[str]:
+    """
+    Extract origin location with support for natural phrases.
+
+    Handles:
+    - "from work/office" → office
+    - "from home" → home
+    - "coming home from X" → X (destination is home, origin is X)
+    - "going from X to Y" → X
+    """
     q = query.lower()
+
+    # "coming home from X" → origin is X, not home
+    if re.search(r"\bcoming\s+home\s+from\b", q):
+        # Extract the place after "from"
+        m = re.search(r"\bcoming\s+home\s+from\s+([a-z][a-z0-9'&.\-\s]{1,40}?)(?=\s+(?:at|on|by|for|tomorrow|today|tonight|morning|afternoon|evening|night)\b|[?.!,;:]|$)", q, flags=re.IGNORECASE)
+        if m:
+            return _clean_extracted_place(m.group(1))
+        return None
+
+    # "from X to Y" → origin is X
+    m = re.search(r"\bfrom\s+([a-z][a-z0-9'&.\-\s]{1,40}?)\s+to\b", q, flags=re.IGNORECASE)
+    if m:
+        origin_candidate = _clean_extracted_place(m.group(1))
+        if origin_candidate:
+            # Normalize work/office aliases
+            if origin_candidate.lower() in ("work", "the office", "my office", "office"):
+                return "office"
+            if origin_candidate.lower() in ("home", "my place"):
+                return "home"
+            return origin_candidate
+
     if re.search(r"\bfrom\s+(?:my\s+)?(?:office|work|the office)\b", q):
         return "office"
     if re.search(r"\bfrom\s+(?:home|my place)\b", q):
         return "home"
-    return "home"
+    return None
 
 
 def _has_specific_time(query: str) -> bool:
@@ -523,7 +638,7 @@ def _needs_time_clarification(query: str, is_best_time: bool = False) -> bool:
 # Intent system prompt (used by all model providers)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_INTENT_SYSTEM_PROMPT = """You are a weather query intent classifier. Parse the user query and output ONLY valid JSON with no markdown, no explanation.
+_INTENT_SYSTEM_PROMPT_FALLBACK = """You are a weather query intent classifier. Parse the user query and output ONLY valid JSON with no markdown, no explanation.
 
 Output format:
 {
@@ -553,10 +668,52 @@ Query: "Weather in Atlanta"           → {"location": "atlanta", "time_referenc
 Query: "What's the weather in Curitiba?" → {"location": "curitiba", "time_reference": "now", "intent_type": "general", "is_commute": false}
 """
 
+try:
+    _INTENT_SYSTEM_PROMPT = (_SKILL_DIR / "intent_system_prompt.txt").read_text(encoding="utf-8")
+except FileNotFoundError:
+    _INTENT_SYSTEM_PROMPT = _INTENT_SYSTEM_PROMPT_FALLBACK
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Model providers (fallback chain)
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _normalise_model_intent(result: WeatherIntent, query: str) -> WeatherIntent:
+    """Fill safety-critical fields that model tiers often omit or misclassify.
+
+    Model output is still useful for open-ended/general location queries, but
+    structured personal-weather flows need deterministic guarantees for origin,
+    destination, time windows, and clarification state.
+    """
+    deterministic = _deterministic_classify(query)
+    if deterministic.is_best_time_request or deterministic.is_travel or deterministic.is_commute:
+        return deterministic
+    result.raw_query = query
+    _enrich_intent_from_query(result, query)
+    if result.location is None:
+        result.location = _extract_location(query)
+    if result.time_reference is None:
+        result.time_reference = _extract_time(query)
+    return result
+
+
+def _model_classify(query: str, clean_query: str) -> Optional[WeatherIntent]:
+    """Run configured model providers in order and normalise their result."""
+    providers: tuple[Callable[[str], Optional[str]], ...] = (
+        _call_configured_llm,
+        _call_omniroute,
+        _call_anthropic,
+        _call_ollama,
+    )
+    for provider in providers:
+        response = provider(clean_query)
+        if not response:
+            continue
+        result = _parse_intent_response(response)
+        if result:
+            return _normalise_model_intent(result, query)
+    return None
+
 
 def _parse_intent_response(response: str) -> Optional[WeatherIntent]:
     """Parse JSON from model response. Returns None on parse failure."""
@@ -815,37 +972,9 @@ def classify_intent(query: str) -> WeatherIntent:
     clean_query = re.sub(r"^(weather|what's the weather|forecast)\s*", "", query.lower())
     clean_query = clean_query.strip("?.,!")
 
-    # Tier 1: configured OpenAI-compatible LLM endpoint
-    response = _call_configured_llm(clean_query)
-    if response:
-        result = _parse_intent_response(response)
-        if result:
-            result.raw_query = query
-            return result
-
-    # Tier 2: GPT 5.4-mini via OmniRoute
-    response = _call_omniroute(clean_query)
-    if response:
-        result = _parse_intent_response(response)
-        if result:
-            result.raw_query = query
-            return result
-
-    # Tier 3: Claude Haiku via OmniRoute
-    response = _call_anthropic(clean_query)
-    if response:
-        result = _parse_intent_response(response)
-        if result:
-            result.raw_query = query
-            return result
-
-    # Tier 4: Ollama (local fallback)
-    response = _call_ollama(clean_query)
-    if response:
-        result = _parse_intent_response(response)
-        if result:
-            result.raw_query = query
-            return result
+    result = _model_classify(query, clean_query)
+    if result:
+        return result
 
     # Final fallback: deterministic
     logger.debug("All model providers failed, using deterministic fallback")

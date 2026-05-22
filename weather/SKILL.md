@@ -1,6 +1,6 @@
 ---
 name: weather
-version: 1.3.0
+version: 1.4.0
 description: Rich weather forecasting for named locations with registry-first location resolution, travel-weather queries, commute-aware advice, intent classification, rain timing, tonight-low logic, chat output, and morning briefing output. Works zero-config with Open-Meteo and enhances with OpenWeatherMap when configured.
 kind: functional
 allowed-tools: Bash, web_fetch
@@ -105,8 +105,10 @@ Provider behaviour:
 | `WEATHER_COMMUTE_EVENING_START` | no | registry/default `16:30` | Evening commute start |
 | `WEATHER_COMMUTE_EVENING_END` | no | registry/default `19:30` | Evening commute end |
 | `WEATHER_LOCATION_REGISTRY_PATH` | no | `skills/weather/location_registry.json` | Runtime registry path override (tests, per-user registries) |
+| `WEATHER_FORECAST_DAYS` | no | `14` | Forecast horizon in days; clamped 1–14 by the provider; also accepts `WEATHER_FORECAST_DAYS` env var |
+| `WEATHER_WEEK_START_DAY` | no | `monday` | Start of week for `this week`/`rest of week` range calculation; accepted values: `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`, `sunday` |
 
-Example commute override:
+Example week-start override:
 
 ```bash
 export WEATHER_COMMUTE_MORNING_START="07:30"
@@ -161,6 +163,9 @@ WeatherIntent(
     travel_window_end=None,      # ISO datetime — end of travel window (start + 1 hour)
     travel_window_label=None,   # human label e.g. "09:00–10:00"
     needs_time_clarify=False,    # True when travel query has vague time (e.g. "tomorrow morning")
+    is_best_time_request=False,  # True when query asks "best time to visit X" or similar
+    candidate_window_start=None, # hour 0-23 — start of evaluated best-time window
+    candidate_window_end=None,   # hour 0-23 — end of evaluated best-time window (exclusive)
     raw_query="...",
 )
 ```
@@ -414,6 +419,8 @@ Weather is fetched for both the origin (Office) and destination (Tribe Waterloo)
 Query: `Weather at Tribe Waterloo` (first time, not yet in registry)
 
 
+
+
 After a successful forecast the location is saved to the registry and the confirmation sentence is appended:
 ```text
 📍 **Tribe Waterloo**
@@ -424,7 +431,23 @@ I've saved Tribe Waterloo for next time.
 ```
 Subsequent queries for Tribe Waterloo resolve from the registry without geocoding.
 
+### 10. Best-time outing query
 
+Query: `Best time to visit Columbia Road Flower Market?`
+
+Intent fields produced:
+```python
+WeatherIntent(
+    is_best_time_request=True,
+    destination="Columbia Road Flower Market",
+    candidate_window_start=8,   # 08:00 (from best_time_windows.json special places)
+    candidate_window_end=15,    # 15:00
+    target_date="today",        # or YYYY-MM-DD if a day name was mentioned
+)
+```
+
+Output: weather analysis for the 08:00-15:00 window, scored by precipitation probability
+and wind, with the recommended hour and weather conditions explained.
 
 ---
 

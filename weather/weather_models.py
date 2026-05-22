@@ -83,6 +83,7 @@ class WeatherData:
     today: Optional[DailyForecast] = None
     tomorrow: Optional[DailyForecast] = None
     day_after: Optional[DailyForecast] = None
+    daily_forecast: list[DailyForecast] = field(default_factory=list)
     hourly_precipitation: list[HourlyPrecipitation] = field(default_factory=list)
     hourly_forecast: list[HourlyForecast] = field(default_factory=list)
     alerts: list[WeatherAlert] = field(default_factory=list)
@@ -90,4 +91,13 @@ class WeatherData:
     source: str = "open-meteo"
 
     def has_usable_data(self) -> bool:
-        return self.current is not None or self.today is not None
+        return self.current is not None or self.today is not None or bool(self.daily_forecast)
+
+    def sync_legacy_daily_fields(self) -> None:
+        """Populate today/tomorrow/day_after from daily_forecast for legacy callers."""
+        if self.daily_forecast:
+            self.today = self.daily_forecast[0]
+        if len(self.daily_forecast) > 1:
+            self.tomorrow = self.daily_forecast[1]
+        if len(self.daily_forecast) > 2:
+            self.day_after = self.daily_forecast[2]

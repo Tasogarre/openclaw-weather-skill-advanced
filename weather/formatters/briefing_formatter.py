@@ -5,11 +5,12 @@ Compact single-line (or single short paragraph) weather output
 for morning briefing. No emoji, text-dense.
 """
 
+import os
 from typing import Optional
 from datetime import datetime
 
 from ..weather_models import WeatherData
-from ..advice_engine import WeatherAdvice
+from ..advice_engine import WeatherAdvice, WEATHER_UMBRELLA_THRESHOLD
 
 
 def _get_tonight_11pm_temp(weather: WeatherData) -> Optional[float]:
@@ -77,7 +78,11 @@ def format_briefing(
         alert_desc = "; ".join(a.event for a in weather.alerts[:2])
         parts.append(f"[{alert_desc}]")
 
-    return "**Weather:** " + ". ".join(parts)
+    result = "**Weather:** " + ". ".join(parts)
+    # Append fallback note when OWM was configured but Open-Meteo was used instead
+    if weather.source == "open-meteo" and os.environ.get("OPENWEATHERMAP_API_KEY"):
+        result += " (via Open-Meteo -- alerts unavailable)"
+    return result
 
 
 def _briefing_advice(weather: WeatherData, advice: WeatherAdvice) -> str:
@@ -126,13 +131,13 @@ def _get_rain_timing(weather: WeatherData) -> str:
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     
-    # Find first significant rain (>30% probability or >0mm)
+    # Find first significant rain (above umbrella threshold or >0mm)
     rain_start = None
     rain_end = None
     max_prob = 0
     
     for hp in weather.hourly_precipitation[:24]:  # Next 24 hours
-        if hp.probability > 30 or hp.mm > 0:
+        if hp.probability > WEATHER_UMBRELLA_THRESHOLD or hp.mm > 0:
             if rain_start is None:
                 rain_start = hp.time
             rain_end = hp.time

@@ -167,7 +167,7 @@ def rain_in_window(
     weather: WeatherData,
     window_start: str,
     window_end: str,
-    probability_threshold: int = 40,
+    probability_threshold: int = 30,
     *,
     window_start_dt: datetime | None = None,
     window_end_dt: datetime | None = None,

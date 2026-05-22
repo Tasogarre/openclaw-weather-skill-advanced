@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "provider": "openai-compatible",
+  "base_url": "",
+  "model": "",
+  "api_key_env": "WEATHER_INTENT_LLM_API_KEY",
+  "timeout_seconds": 8,
+  "ollama": {
+    "model": "llama3.2:3b",
+    "base_url": "http://localhost:11434"
+  }
+}

@@ -15,3 +15,8 @@ weather/location_registry.private.json
 # Local privacy scan denylist; contains private values and must never be committed.
 .private-denylist
 .private-denylist.*
+# Weather skill local/private configuration; commit examples/templates only.
+weather/intent_llm.json
+weather/intent_llm.local.json
+weather/weather_settings.json
+weather/weather_settings.local.json

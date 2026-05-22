@@ -31,10 +31,11 @@ For commute queries:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from .intent_classifier import classify_intent, WeatherIntent
+from .intent_classifier import classify_intent, WeatherIntent, build_travel_window
+from . import weather_engine
 from .weather_engine import (
     get_weather,
     get_commute_windows,
@@ -43,24 +44,34 @@ from .weather_engine import (
     WeatherEngineError,
 )
 from .advice_engine import (
+    WEATHER_UMBRELLA_THRESHOLD,
     advice_for_location,
     commute_umbrella_check,
     score_best_time_windows,
-    WeatherAdvice,
 )
-from .formatters.chat_formatter import format_chat
+from .evaluation_context import (
+    build_evaluation_context,
+    coerce_iso_datetime,
+    detect_commute_direction,
+    hourly_precip_by_hour,
+    EvaluationContext,
+)
+from .formatters.chat_formatter import format_chat, format_forecast_range
 from .formatters.briefing_formatter import format_briefing
 from .weather_models import WeatherData
 
 
 # ── Chat interface ───────────────────────────────────────────────
 
-def get_weather_chat(query: str) -> str:
+def get_weather_chat(query: str, departure_time: Optional[str] = None) -> str:
     """
     Handle an interactive weather query and return chat-formatted output.
 
     Args:
         query: natural-language weather query
+        departure_time: optional HH:MM departure time for travel queries. When provided
+            and the query has needs_time_clarify=True, injects the time directly instead
+            of returning the clarification string. Ignored when not needed.
 
     Returns:
         Formatted chat string ready to send to user.
@@ -70,28 +81,53 @@ def get_weather_chat(query: str) -> str:
         # Step 1: classify intent
         intent = classify_intent(query)
 
-        # Step 2: handle travel queries with inline time clarification
-        if intent.is_travel and intent.needs_time_clarify and not intent.is_best_time_request:
-            dest = intent.destination or "that location"
-            return f"⏰ What time are you leaving for {dest} tomorrow?"
+        # Step 2: build evaluation context (central date/time/location layer)
+        ctx = build_evaluation_context(intent)
 
-        # Step 3: best-time outing optimization (U7)
+        # Step 3: handle travel queries with inline time clarification
+        # If the caller supplies departure_time, resolve the pending vague travel
+        # window before honoring the clarification state from the first context.
+        if intent.is_travel and intent.needs_time_clarify and not intent.is_best_time_request:
+            if departure_time:
+                # Agent-native path: inject departure time directly, skip clarification
+                intent.departure_time = departure_time
+                window = build_travel_window(intent.time_reference, departure_time)
+                intent.travel_window_start = window[0]
+                intent.travel_window_end = window[1]
+                intent.travel_window_label = window[2]
+                intent.needs_time_clarify = False
+                # Rebuild context with resolved time
+                ctx = build_evaluation_context(intent)
+            else:
+                dest = intent.destination or "that location"
+                return f"⏰ What time are you leaving for {dest} tomorrow?"
+
+        # Step 4: handle clarification state for other incomplete contexts
+        if ctx.needs_clarification:
+            return ctx.clarification_prompt or "⏰ What time are you leaving?"
+
+        # Step 5: range forecast surfaces
+        range_mode = _detect_forecast_range_mode(query)
+        if range_mode:
+            return _handle_forecast_range_query(intent, range_mode)
+
+        # Step 6: best-time optimization. Commute timing is handled separately
+        # from outing/destination timing because it must score both Home and Office.
+        if intent.is_commute and intent.is_best_time_request:
+            return _handle_commute_best_time_query(intent, ctx)
+
         if intent.is_best_time_request:
             return _handle_best_time_query(intent)
 
-        # Step 4: determine if dual-location needed (commute query)
+        # Step 7: determine if dual-location needed (commute query)
         if intent.is_commute:
-            return _handle_commute_query(intent)
+            return _handle_commute_query(intent, ctx)
 
         if intent.is_travel and intent.destination:
-            return _handle_travel_query(intent)
+            return _handle_travel_query(intent, ctx)
 
-
-        # Step 5: single location query
-        location_input = intent.location
-        if intent.is_travel and intent.destination:
-            location_input = intent.destination
-        return _handle_single_location_query(intent, location_input)
+        # Step 8: single location query
+        return _handle_single_location_query(intent, intent.location)
 
     except LocationNotFoundError:
         return f"❓ Couldn't find that location — try a city name like 'London' or 'Atlanta'."
@@ -101,18 +137,57 @@ def get_weather_chat(query: str) -> str:
         return f"⚠️ Something went wrong: {e}"
 
 
+def _detect_forecast_range_mode(query: str) -> Optional[str]:
+    q = query.lower()
+    # 14-day / 2-week must come before 7-day / week to avoid false matches
+    if any(term in q for term in (
+        "next 14 days", "14 day", "14-day", "fourteen day", "fourteen-day",
+        "next 2 weeks", "next two weeks", "coming 2 weeks", "coming two weeks",
+        "next fortnight",
+    )):
+        return "next_14_days"
+    if any(term in q for term in (
+        "next 10 days", "10 day", "10-day", "ten day", "ten-day",
+    )):
+        return "next_10_days"
+    if any(term in q for term in (
+        "next 7 days", "7 day", "7-day", "seven day", "seven-day",
+        "week ahead", "next week",
+    )):
+        return "next_7_days"
+    if any(term in q for term in ("rest of the week", "rest of week", "this week")):
+        return "rest_of_week"
+    return None
+
+
+def _display_for_location(location_input: str, fallback: str) -> str:
+    """Return the registry/geocoder display label for a weather location."""
+    try:
+        registry_entry, geo = resolve_location(location_input)
+        display = registry_entry.get("display_name") if registry_entry else geo.name
+        return display.replace("St. ", "St ") if isinstance(display, str) else fallback
+    except Exception:
+        return fallback
+
+
+def _handle_forecast_range_query(intent: WeatherIntent, mode: str) -> str:
+    location_input = intent.location or "home"
+    weather = get_weather(location_input)
+    display = _display_for_location(location_input, weather.location_label)
+
+    output = format_forecast_range(weather, mode=mode, location_display=display)
+    confirmation = getattr(weather, "registry_confirmation", None)
+    if confirmation:
+        output += f"\n\n{confirmation}"
+    return output
+
+
 def _handle_single_location_query(intent: WeatherIntent, location_input: str) -> str:
     """Handle a single-location weather query."""
     weather = get_weather(location_input)
     advice = advice_for_location(weather)
 
-    # Resolve location display name
-    try:
-        _, geo = resolve_location(location_input)
-        registry_entry, _ = resolve_location(location_input)
-        display = registry_entry.get("display_name") if registry_entry else geo.name
-    except Exception:
-        display = weather.location_label
+    display = _display_for_location(location_input, weather.location_label)
 
     output = format_chat(weather, advice, location_display=display)
     confirmation = getattr(weather, "registry_confirmation", None)
@@ -124,13 +199,10 @@ def _handle_single_location_query(intent: WeatherIntent, location_input: str) ->
 def _parse_window(intent: WeatherIntent) -> tuple[datetime | None, datetime | None]:
     if not intent.travel_window_start or not intent.travel_window_end:
         return None, None
-    try:
-        return datetime.fromisoformat(intent.travel_window_start), datetime.fromisoformat(intent.travel_window_end)
-    except ValueError:
-        return None, None
+    return coerce_iso_datetime(intent.travel_window_start), coerce_iso_datetime(intent.travel_window_end)
 
 
-def _travel_rain_reasons(weather: WeatherData, label: str, intent: WeatherIntent, threshold: int = 30) -> list[str]:
+def _travel_rain_reasons(weather: WeatherData, label: str, intent: WeatherIntent, threshold: int = WEATHER_UMBRELLA_THRESHOLD) -> list[str]:
     start, end = _parse_window(intent)
     if not start or not end:
         return []
@@ -145,7 +217,7 @@ def _travel_rain_reasons(weather: WeatherData, label: str, intent: WeatherIntent
     return reasons
 
 
-def _handle_travel_query(intent: WeatherIntent) -> str:
+def _handle_travel_query(intent: WeatherIntent, ctx: Optional[EvaluationContext] = None) -> str:
     destination = intent.destination or intent.location
     origin = intent.origin or "home"
     destination_weather = get_weather(destination)
@@ -163,16 +235,27 @@ def _handle_travel_query(intent: WeatherIntent) -> str:
     lines.append(f"📍 **Destination: {destination}**")
     lines.append(format_chat(destination_weather, destination_advice, location_display=destination).split("\n", 1)[-1])
 
+    # Window-scoped rain check using evaluation context
     reasons = []
-    reasons.extend(_travel_rain_reasons(origin_weather, "origin", intent, threshold=30))
-    reasons.extend(_travel_rain_reasons(destination_weather, "destination", intent, threshold=30))
+    if ctx and ctx.has_window():
+        origin_risky, origin_reasons = ctx.rain_in_window(origin_weather.hourly_precipitation)
+        if origin_risky:
+            reasons.extend(f"Origin: {r}" for r in origin_reasons)
+        dest_risky, dest_reasons = ctx.rain_in_window(destination_weather.hourly_precipitation)
+        if dest_risky:
+            reasons.extend(f"Destination: {r}" for r in dest_reasons)
+    else:
+        # Fallback to legacy window parsing
+        reasons.extend(_travel_rain_reasons(origin_weather, "origin", intent, threshold=WEATHER_UMBRELLA_THRESHOLD))
+        reasons.extend(_travel_rain_reasons(destination_weather, "destination", intent, threshold=WEATHER_UMBRELLA_THRESHOLD))
+
     if reasons:
         lines.append("")
-        lines.append(f"☂️ **Travel umbrella:** Bring one for {window_label}.")
+        lines.append(f"☔ **Travel umbrella:** Bring one for {window_label}.")
         lines.extend(f"   • {reason}" for reason in reasons)
     else:
         lines.append("")
-        lines.append(f"☂️ **Travel umbrella:** Not needed for {window_label} at origin or destination.")
+        lines.append(f"☔ **Travel umbrella:** Not needed for {window_label} at origin or destination.")
 
     confirmations = [getattr(origin_weather, "registry_confirmation", None), getattr(destination_weather, "registry_confirmation", None)]
     confirmations = [c for c in confirmations if c]
@@ -205,12 +288,16 @@ def _handle_best_time_query(intent: WeatherIntent) -> str:
 
 
     try:
-        weather = get_weather(destination)
+        weather = weather_engine.get_weather(destination)
     except (LocationNotFoundError, WeatherEngineError):
         return f"❓ Couldn't get weather for {destination}. Try a different location."
 
 
-    now = datetime.now()
+    # Only clamp same-day live forecasts. Tests and non-today forecasts may carry
+    # provider/model dates that are not today's date in the runtime environment.
+    forecast_dates = {hp.time.date() for hp in weather.hourly_precipitation}
+    today = datetime.now().date()
+    now = datetime.now() if intent.target_date == "today" and today in forecast_dates else None
     scored_windows = score_best_time_windows(
         weather,
         candidate_start_hour=start_hour,
@@ -232,6 +319,7 @@ def _handle_best_time_query(intent: WeatherIntent) -> str:
                 f"🌧️ Rain is expected throughout the best visiting window for {destination} today. "
                 f"I'd recommend rescheduling if you can — the forecast doesn't offer a dry break in the usual visiting hours."
             )
+        scored_windows = fallback
 
     best = scored_windows[0]
     best_time = best.time
@@ -240,15 +328,9 @@ def _handle_best_time_query(intent: WeatherIntent) -> str:
 
     # Build window label
     window_label = best_time.strftime("%H:%M")
-    window_end_label = (best_time.replace(minute=50) + __import__('datetime').timedelta(hours=1)).strftime("%H:%M")
+    window_end_label = (best_time.replace(minute=50) + timedelta(hours=1)).strftime("%H:%M")
 
-    # Destination display name
-    try:
-        _, geo = resolve_location(destination)
-        registry_entry, _ = resolve_location(destination)
-        display = registry_entry.get("display_name") if registry_entry else geo.name
-    except Exception:
-        display = destination
+    display = _display_for_location(destination, destination)
 
     lines = []
     lines.append(f"🌤️ **Best time for {display}: {window_label}–{window_end_label}**")
@@ -264,6 +346,18 @@ def _handle_best_time_query(intent: WeatherIntent) -> str:
     lines.append("📍 **Why this window:**")
     lines.append(f"Scored {len(scored_windows)} candidate hour(s). Lowest precipitation in the practical outing window")
     lines.append(f"({start_hour:02d}:00–{end_hour:02d} local time).")
+    if best.explanation:
+        lines.append(f"Conditions: {best.explanation}.")
+
+    # Ranked candidate windows with explanation
+    if len(scored_windows) > 1:
+        lines.append("")
+        lines.append("📊 **Ranked candidates:**")
+        for i, w in enumerate(scored_windows[:5], 1):
+            marker = "✅" if i == 1 else "  "
+            status = "best" if i == 1 else f"#{i}"
+            expl = f" — {w.explanation}" if w.explanation else ""
+            lines.append(f"{marker} {status}: {w.time:%H:%M} — {w.precip_probability}% rain risk{expl}")
 
     confirmations = getattr(weather, "registry_confirmation", None)
     if confirmations:
@@ -273,13 +367,79 @@ def _handle_best_time_query(intent: WeatherIntent) -> str:
     return "\n".join(lines)
 
 
-def _handle_commute_query(intent: WeatherIntent) -> str:
+def _handle_commute_best_time_query(intent: WeatherIntent, ctx: Optional[EvaluationContext] = None) -> str:
+    """Recommend the best departure hour within the configured commute window."""
+    windows = get_commute_windows()
+    direction = detect_commute_direction(intent.raw_query)
+    window = windows.get(direction, {"start": "08:30", "end": "11:30"})
+    direction_label = f"{direction} commute"
+    ctx = ctx or build_evaluation_context(intent)
+    ctx_window = ctx.primary_window()
+
+    try:
+        home_weather = get_weather("home")
+        office_weather = get_weather("office")
+    except (LocationNotFoundError, WeatherEngineError) as e:
+        return f"❓ Couldn't get commute weather: {e}"
+
+    home_by_hour = hourly_precip_by_hour(home_weather, ctx_window) if ctx_window else {}
+    office_by_hour = hourly_precip_by_hour(office_weather, ctx_window) if ctx_window else {}
+    candidate_hours = sorted(set(home_by_hour) | set(office_by_hour))
+
+    if not candidate_hours:
+        # Fall back to the start of the commute window when hourly rain data is unavailable.
+        best_label = window["start"]
+        lines = [
+            f"🌧️ **Best time to leave:** {best_label} (limited hourly rain data)",
+            f"☂️ **Umbrella:** check live conditions before leaving — no hourly commute rain signal available.",
+            f"🕒 **Window checked:** {window['start']}–{window['end']} ({direction_label})",
+        ]
+        return "\n".join(lines)
+
+    # Score: lower max precip across home+office is better
+    ranked = sorted(
+        (max(home_by_hour.get(hour, 0), office_by_hour.get(hour, 0)), hour)
+        for hour in candidate_hours
+    )
+    best_prob, best_hour = ranked[0]
+    best_label = f"{best_hour:02d}:00"
+    needs_umbrella = best_prob >= WEATHER_UMBRELLA_THRESHOLD
+
+    lines = [
+        f"🌧️ **Best time to leave:** {best_label} — lowest commute rain risk ({best_prob}%).",
+        (
+            f"☂️ **Umbrella:** bring one — even the best slot is at/above {WEATHER_UMBRELLA_THRESHOLD}% rain risk."
+            if needs_umbrella
+            else f"☂️ **Umbrella:** probably not needed if you leave around {best_label}."
+        ),
+        f"🕒 **Window checked:** {window['start']}–{window['end']} ({direction_label})",
+        "📍 **Checked:** Home + Office",
+    ]
+
+    # Show ranked candidate windows with explanation
+    if len(ranked) > 1:
+        lines.append("")
+        lines.append("📊 **Ranked commute windows:**")
+        for i, (prob, hour) in enumerate(ranked[:5], 1):
+            marker = "✅" if i == 1 else "  "
+            home_p = home_by_hour.get(hour, 0)
+            office_p = office_by_hour.get(hour, 0)
+            detail = f"Home {home_p}% / Office {office_p}%"
+            lines.append(f"{marker} #{i}: {hour:02d}:00 — max {prob}% rain ({detail})")
+
+    return "\n".join(lines)
+
+
+def _handle_commute_query(intent: WeatherIntent, ctx: Optional[EvaluationContext] = None) -> str:
     """
     Handle a commute query: fetch weather for both home and office,
     check rain at both during commute window, and advise accordingly.
     """
     windows = get_commute_windows()
-    morning = windows.get("morning", {"start": "08:30", "end": "11:30"})
+    direction = detect_commute_direction(intent.raw_query)
+    window = windows.get(direction, {"start": "08:30", "end": "11:30"})
+    direction_label = f"{direction} commute"
+    ctx_window = ctx.primary_window() if ctx else None
 
     # Fetch weather for both locations
     try:
@@ -292,21 +452,34 @@ def _handle_commute_query(intent: WeatherIntent) -> str:
     except (LocationNotFoundError, WeatherEngineError) as e:
         return f"❓ Couldn't get office weather: {e}"
 
-    # Commute umbrella check
+    # Commute umbrella check — window-scoped via evaluation context
     needs_umbrella, umbrella_reasons = commute_umbrella_check(
         home_weather,
         office_weather,
-        window_start=morning["start"],
-        window_end=morning["end"],
-        threshold=30,
+        window_start=window["start"],
+        window_end=window["end"],
+        threshold=WEATHER_UMBRELLA_THRESHOLD,
+        window=ctx_window,
     )
 
     # Generate advice for both locations
     home_advice = advice_for_location(home_weather)
     office_advice = advice_for_location(office_weather)
 
-    # Build output with both locations
+    # Build output with rain/umbrella decision first.
     lines = []
+    if needs_umbrella:
+        lines.append(f"🌧️ **Rain decision:** Bring an umbrella for the {direction_label} ({window['start']}–{window['end']}).")
+        lines.append("☂️ **Umbrella:** yes — rain risk at Home or Office crosses the threshold.")
+        for reason in umbrella_reasons:
+            lines.append(f"   • {reason}")
+        lines.append(f"☔ **Commute umbrella:** Bring one — rain expected during {direction_label}")
+    else:
+        lines.append(f"🌧️ **Rain decision:** No umbrella needed for the {direction_label} ({window['start']}–{window['end']}).")
+        lines.append("☂️ **Umbrella:** no — Home and Office stay below the rain threshold.")
+        lines.append(f"☔ **Commute umbrella:** Not needed during {direction_label}")
+
+    lines.append("")
 
     # Home block
     lines.append("🏠 **Home**")
@@ -316,16 +489,6 @@ def _handle_commute_query(intent: WeatherIntent) -> str:
     lines.append("")
     lines.append("🏢 **Office**")
     lines.append(format_chat(office_weather, office_advice, location_display="Office").split("\n", 1)[-1])
-
-    # Commute advice
-    if needs_umbrella:
-        lines.append("")
-        lines.append(f"☂️ **Commute umbrella:** Bring one — rain expected during morning commute")
-        for reason in umbrella_reasons:
-            lines.append(f"   • {reason}")
-    else:
-        lines.append("")
-        lines.append("☂️ **Commute umbrella:** Not needed during morning commute")
 
     return "\n".join(lines)
 
@@ -357,25 +520,37 @@ def get_weather_briefing(location: str = "home") -> str:
         return f"**Weather:** check failed ({e})"
 
 
-def get_weather_briefing_commute() -> str:
+def get_weather_briefing_commute(query: str = "") -> str:
     """
     Return commute-aware briefing with both home and office conditions.
 
     Used by morning briefing when commute weather is relevant.
+
+    Args:
+        query: optional raw query used for commute direction detection (morning vs evening)
     """
     try:
+        intent = classify_intent(query or "commute weather")
+        intent.is_commute = True
+        intent.is_travel = False
+        ctx = build_evaluation_context(intent)
+        ctx_window = ctx.primary_window()
+
         home_weather = get_weather("home")
         office_weather = get_weather("office")
 
+        direction = detect_commute_direction(query)
         windows = get_commute_windows()
-        morning = windows.get("morning", {"start": "08:30", "end": "11:30"})
+        commute_window = windows.get(direction, {"start": "08:30", "end": "11:30"})
+        direction_label = f"{direction} commute"
 
         needs_umbrella, reasons = commute_umbrella_check(
             home_weather,
             office_weather,
-            window_start=morning["start"],
-            window_end=morning["end"],
-            threshold=30,
+            window_start=commute_window["start"],
+            window_end=commute_window["end"],
+            threshold=WEATHER_UMBRELLA_THRESHOLD,
+            window=ctx_window,
         )
 
         home_advice = advice_for_location(home_weather)
@@ -386,9 +561,9 @@ def get_weather_briefing_commute() -> str:
 
         output = f"**Home:** {home_brief}\n**Office:** {office_brief}"
         if needs_umbrella:
-            output += "\n**Commute:** Rain expected during morning commute — bring umbrella."
+            output += f"\n**Commute:** Rain expected during {direction_label} — bring umbrella."
         else:
-            output += "\n**Commute:** No rain expected during morning commute."
+            output += f"\n**Commute:** No rain expected during {direction_label}."
 
         return output
 

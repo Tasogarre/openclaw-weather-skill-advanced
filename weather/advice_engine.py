@@ -17,9 +17,12 @@ Advice rules:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import NamedTuple, Optional
+
+WEATHER_UMBRELLA_THRESHOLD = int(os.environ.get("WEATHER_UMBRELLA_THRESHOLD", "30"))
 
 
 class ScoredBestTimeWindow(NamedTuple):
@@ -28,6 +31,9 @@ class ScoredBestTimeWindow(NamedTuple):
     precip_probability: int
     wind_speed: Optional[float] = None
     feels_like: Optional[float] = None
+    rank: int = 0
+    explanation: str = ""
+    composite_score: float = 0.0
 
 
 def score_best_time_windows(
@@ -99,9 +105,71 @@ def score_best_time_windows(
         ))
 
 
-    # Sort: lowest precip first, then wind, then temperature comfort
-    scored.sort(key=lambda w: (w.precip_probability, (w.wind_speed or 0) / 10.0, abs((w.feels_like or 15) - 18) / 5.0))
-    return scored
+    # Build composite score (lower is better)
+    def _score(w: ScoredBestTimeWindow) -> float:
+        precip = w.precip_probability
+        wind = (w.wind_speed or 0) / 10.0
+        temp = abs((w.feels_like or 15) - 18) / 5.0
+        return precip * 3.0 + wind * 1.0 + temp * 0.5
+
+    scored_with_score = [
+        ScoredBestTimeWindow(
+            time=w.time,
+            precip_probability=w.precip_probability,
+            wind_speed=w.wind_speed,
+            feels_like=w.feels_like,
+            rank=0,
+            explanation=_explain_window(w),
+            composite_score=_score(w),
+        )
+        for w in scored
+    ]
+
+    scored_with_score.sort(key=lambda w: w.composite_score)
+    ranked = [
+        ScoredBestTimeWindow(
+            time=w.time,
+            precip_probability=w.precip_probability,
+            wind_speed=w.wind_speed,
+            feels_like=w.feels_like,
+            rank=idx + 1,
+            explanation=w.explanation,
+            composite_score=w.composite_score,
+        )
+        for idx, w in enumerate(scored_with_score)
+    ]
+    return ranked
+
+
+def _explain_window(w: ScoredBestTimeWindow) -> str:
+    """Generate a human-readable explanation for why this window was scored."""
+    parts: list[str] = []
+    if w.precip_probability <= 10:
+        parts.append("very low rain chance")
+    elif w.precip_probability <= 30:
+        parts.append("low rain chance")
+    elif w.precip_probability <= 50:
+        parts.append("moderate rain chance")
+    else:
+        parts.append("high rain chance")
+
+    if w.wind_speed is not None:
+        if w.wind_speed > 40:
+            parts.append("strong winds")
+        elif w.wind_speed > 25:
+            parts.append("breezy")
+        else:
+            parts.append("calm winds")
+
+    if w.feels_like is not None:
+        if 15 <= w.feels_like <= 22:
+            parts.append("comfortable temperature")
+        elif w.feels_like < 10:
+            parts.append("cold")
+        elif w.feels_like > 25:
+            parts.append("warm")
+
+    return ", ".join(parts)
 
 
 from .weather_models import WeatherData
@@ -145,16 +213,16 @@ def advice_for_location(weather: WeatherData) -> WeatherAdvice:
             f"currently raining ({weather.current.precipitation_mm}mm)"
         )
 
-    # Check today's precip probability
-    if weather.today and weather.today.precip_probability > 30:
+    # Check today's precip probability (general/day-level advice)
+    if weather.today and weather.today.precip_probability > WEATHER_UMBRELLA_THRESHOLD:
         adv.umbrella = True
         adv.umbrella_reasons.append(
             f"rain expected ({weather.today.precip_probability}% chance)"
         )
 
-    # Check hourly precipitation probabilities
+    # Check hourly precipitation probabilities (general/day-level advice)
     for hp in weather.hourly_precipitation:
-        if hp.probability > 30:
+        if hp.probability > WEATHER_UMBRELLA_THRESHOLD:
             adv.umbrella = True
             time_str = hp.time.strftime("%H:%M")
             adv.umbrella_reasons.append(
@@ -217,6 +285,7 @@ def commute_umbrella_check(
     window_start: str = "08:30",
     window_end: str = "11:30",
     threshold: int = 30,
+    window=None,
 ) -> tuple[bool, list[str]]:
     """
     Check rain risk at both home and office during a commute window.
@@ -232,53 +301,45 @@ def commute_umbrella_check(
     Returns:
         (needs_umbrella: bool, reasons: list[str])
     """
-    from .weather_engine import rain_in_window
+    from .evaluation_context import WeatherWindow, precipitation_in_window
 
     reasons = []
     needs_umbrella = False
 
-    # Check home
-    home_risky = rain_in_window(home_weather, window_start, window_end, threshold)
+    if window is None:
+        # Backward-compatible fallback for direct callers: build a generic
+        # window for today. Skill entry points pass a fully resolved context
+        # window so tomorrow/evening commute decisions use the requested date.
+        now = datetime.now(timezone.utc)
+        base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            start_h, start_m = map(int, window_start.split(":"))
+            end_h, end_m = map(int, window_end.split(":"))
+            start_dt = base.replace(hour=start_h, minute=start_m)
+            end_dt = base.replace(hour=end_h, minute=end_m)
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
+        except ValueError:
+            return False, []
+
+        window = WeatherWindow(
+            label=f"commute ({window_start}–{window_end})",
+            start=start_dt,
+            end=end_dt,
+            window_type="commute",
+        )
+
+    # Check home — window-scoped only
+    home_risky, home_reasons = precipitation_in_window(home_weather.hourly_precipitation, window, threshold)
     if home_risky:
         needs_umbrella = True
-        reasons.append(
-            f"Rain expected at Home during morning commute "
-            f"({window_start}–{window_end})"
-        )
+        reasons.extend(f"Home: {r}" for r in home_reasons)
 
-    # Check office
-    office_risky = rain_in_window(office_weather, window_start, window_end, threshold)
+    # Check office — window-scoped only
+    office_risky, office_reasons = precipitation_in_window(office_weather.hourly_precipitation, window, threshold)
     if office_risky:
         needs_umbrella = True
-        reasons.append(
-            f"Rain expected at Office during morning commute "
-            f"({window_start}–{window_end})"
-        )
-
-    # Also check via hourly_precipitation directly as a fallback check
-    if not needs_umbrella:
-        # Double-check: aggregate all hourly probabilities across both locations
-        for weather in (home_weather, office_weather):
-            for hp in weather.hourly_precipitation:
-                t = hp.time.time()
-                from datetime import time as dt_time
-                try:
-                    start_h, start_m = map(int, window_start.split(":"))
-                    end_h, end_m = map(int, window_end.split(":"))
-                    start_t = dt_time(start_h, start_m)
-                    end_t = dt_time(end_h, end_m)
-                    if start_t <= t <= end_t and hp.probability > threshold:
-                        needs_umbrella = True
-                        loc_label = weather.location_label
-                        reasons.append(
-                            f"Rain chance {hp.probability}% at {loc_label} "
-                            f"at {t.strftime('%H:%M')}"
-                        )
-                        break
-                except ValueError:
-                    pass
-            if needs_umbrella:
-                break
+        reasons.extend(f"Office: {r}" for r in office_reasons)
 
     return needs_umbrella, reasons
 

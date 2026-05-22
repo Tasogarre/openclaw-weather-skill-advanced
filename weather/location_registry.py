@@ -1,5 +1,5 @@
 """
-location_registry.py — Structured registry helpers for the weather skill.
+location_registry.py - Structured registry helpers for the weather skill.
 
 The registry is the weather skill's canonical source for known places. Known
 entries with coordinates resolve directly to GeoResult objects; legacy entries
@@ -39,6 +39,9 @@ def registry_path(default: Path = DEFAULT_REGISTRY_PATH) -> Path:
     override = os.environ.get(REGISTRY_PATH_ENV)
     if override:
         return Path(override).expanduser()
+    # Never write to the example file — if the committed registry is missing,
+    # the caller must copy the example manually. Runtime writes go to the
+    # default path only when it exists.
     return Path(default)
 
 
@@ -50,9 +53,34 @@ def load_registry(path: Optional[Path] = None) -> dict[str, Any]:
         return json.load(f)
 
 
+def _is_example_source(entry: dict[str, Any]) -> bool:
+    """Return True if the entry is marked as example/sample data."""
+    source = str(entry.get("source", "")).lower()
+    return source in ("example", "sample", "public")
+
+
+def _is_protected_path(path: Path) -> bool:
+    """Return True if the path points to a committed example/sample file."""
+    try:
+        resolved = path.resolve()
+        example_resolved = EXAMPLE_REGISTRY_PATH.resolve()
+        return resolved == example_resolved
+    except OSError:
+        return False
+
+
 def save_registry(registry: dict[str, Any], path: Optional[Path] = None) -> None:
-    """Atomically save a registry JSON file in-place."""
+    """Atomically save a registry JSON file in-place.
+
+    Raises RuntimeError if the target is the committed example registry,
+    preventing accidental writes to sample data.
+    """
     selected = registry_path(path or DEFAULT_REGISTRY_PATH)
+    if _is_protected_path(selected):
+        raise RuntimeError(
+            f"Cannot write to protected example registry: {selected}. "
+            f"Set WEATHER_LOCATION_REGISTRY_PATH to a local file."
+        )
     selected.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(registry, indent=2, ensure_ascii=False) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=f".{selected.name}.", suffix=".tmp", dir=str(selected.parent))
@@ -163,7 +191,10 @@ def resolve_registry_location(
     if update_last_used:
         locations = registry.setdefault("locations", {})
         locations[key]["last_used_at"] = _now_iso()
-        save_registry(registry, selected)
+        # Skip updating last_used if this is the example registry to avoid
+        # dirtying committed sample data.
+        if not _is_protected_path(selected):
+            save_registry(registry, selected)
         entry = locations[key]
 
     return RegistryResolution(key=key, entry=entry, geo=geo, used_direct_coordinates=used_direct)
@@ -180,6 +211,49 @@ def slugify_location(query: str, existing: Optional[set[str]] = None) -> str:
     return f"{base}_{counter}"
 
 
+def list_registry_locations(*, path: Optional[Path] = None) -> list[dict]:
+    """
+    Return all registry entries as a list of dicts for inspection and cleanup.
+
+    Each dict contains: key, display_name, source, last_used_at, aliases.
+    """
+    registry = load_registry(registry_path(path or DEFAULT_REGISTRY_PATH))
+    locations = registry.get("locations", {})
+    result = []
+    for key, entry in locations.items():
+        result.append({
+            "key": key,
+            "display_name": entry.get("display_name") or entry.get("canonical") or key,
+            "source": entry.get("source", "static"),
+            "last_used_at": entry.get("last_used_at"),
+            "aliases": sorted(_entry_aliases(key, entry)),
+        })
+    return result
+
+
+def delete_registry_location(alias_or_key: str, *, path: Optional[Path] = None) -> bool:
+    """
+    Atomically remove the registry entry matching by primary key or any alias.
+
+    Returns True if an entry was deleted, False if not found.
+    """
+    selected = registry_path(path or DEFAULT_REGISTRY_PATH)
+    registry = load_registry(selected)
+    locations = registry.get("locations", {})
+    query = _normalise_alias(alias_or_key)
+    target_key = None
+    for key, entry in locations.items():
+        if query in _entry_aliases(key, entry):
+            target_key = key
+            break
+    if target_key is None:
+        return False
+    del locations[target_key]
+    registry["locations"] = locations
+    save_registry(registry, selected)
+    return True
+
+
 def add_dynamic_location(
     query: str,
     geo: GeoResult,
@@ -193,10 +267,17 @@ def add_dynamic_location(
     Returns a human confirmation sentence when a new record is written, otherwise
     None. Low/medium confidence results are deliberately not auto-saved in this
     implementation slice.
+
+    Raises RuntimeError if the target registry is the committed example file.
     """
     if confidence != "high":
         return None
     selected = registry_path(path or DEFAULT_REGISTRY_PATH)
+    if _is_protected_path(selected):
+        raise RuntimeError(
+            f"Cannot write to protected example registry: {selected}. "
+            f"Set WEATHER_LOCATION_REGISTRY_PATH to a local file."
+        )
     registry = load_registry(selected)
     if find_entry(registry, query):
         return None
@@ -223,4 +304,4 @@ def add_dynamic_location(
         "last_used_at": now,
     }
     save_registry(registry, selected)
-    return f"I’ve saved {display_name} for next time."
+    return f"I've saved {display_name} for next time."

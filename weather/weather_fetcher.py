@@ -24,15 +24,24 @@ from typing import Optional
 
 from .weather_models import (
     WeatherData, CurrentConditions, DailyForecast, HourlyPrecipitation,
-    WeatherAlert,
+    WeatherAlert, HourlyForecast,
 )
 from .geocoding import GeoResult
+from .weather_settings import get_forecast_days
 
 logger = logging.getLogger(__name__)
 
 OWM_WEATHER_API = "https://api.openweathermap.org/data/3.0/onecall"
 OM_FORECAST_API = "https://api.open-meteo.com/v1/forecast"
 OWM_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY", "")
+DEFAULT_FORECAST_DAYS = 14
+MAX_FORECAST_DAYS = 14
+
+
+def _forecast_days() -> int:
+    """Configured forecast horizon, clamped to provider-supported 1-14 days."""
+    return max(1, min(MAX_FORECAST_DAYS, get_forecast_days()))
+
 
 
 class WeatherFetchError(Exception):
@@ -137,7 +146,7 @@ def _fetch_owm(geo: GeoResult) -> Optional[WeatherData]:
         "lat": geo.latitude,
         "lon": geo.longitude,
         "units": "metric",
-        "exclude": "minutely,alerts",   # alerts handled separately below
+        "exclude": "minutely,alerts",   # keep daily/hourly for full forecast interface
         "appid": OWM_API_KEY,
     }
     url = f"{OWM_WEATHER_API}?{urllib.parse.urlencode(params)}"
@@ -180,9 +189,9 @@ def _fetch_owm(geo: GeoResult) -> Optional[WeatherData]:
             pressure_hPa=float(cur.get("pressure", 0)) or None,
         )
 
-    # ── Daily (today, tomorrow, day_after) ────────────────────────────────────
+    # ── Daily forecast horizon ───────────────────────────────────────────────
     daily_list = raw.get("daily", [])
-    for idx, day_block in enumerate(daily_list[:3]):
+    for day_block in daily_list[:_forecast_days()]:
         dt_iso = day_block.get("dt", 0)
         if not dt_iso:
             continue
@@ -201,12 +210,8 @@ def _fetch_owm(geo: GeoResult) -> Optional[WeatherData]:
             sunrise=datetime.fromtimestamp(day_block["sunrise"]).astimezone(dt_tz.utc).strftime("%H:%M") if day_block.get("sunrise") else None,
             sunset=datetime.fromtimestamp(day_block["sunset"]).astimezone(dt_tz.utc).strftime("%H:%M") if day_block.get("sunset") else None,
         )
-        if idx == 0:
-            wd.today = df
-        elif idx == 1:
-            wd.tomorrow = df
-        elif idx == 2:
-            wd.day_after = df
+        wd.daily_forecast.append(df)
+    wd.sync_legacy_daily_fields()
 
     # ── Hourly precipitation + temperature ──────────────────────────────────
     hourly_list = raw.get("hourly", [])
@@ -226,7 +231,6 @@ def _fetch_owm(geo: GeoResult) -> Optional[WeatherData]:
         ))
         
         # Also populate hourly_forecast for tonight's low calculation
-        from .weather_models import HourlyForecast
         code = int(h.get("weather", [{}])[0].get("id", 0))
         wd.hourly_forecast.append(HourlyForecast(
             time=t,
@@ -293,16 +297,17 @@ def _fetch_owm_alerts(geo: GeoResult) -> list[WeatherAlert]:
 # Open-Meteo (always available — fallback when no OWM key or OWM fails)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _om_build_forecast_url(lat: float, lon: float, timezone_str: str) -> str:
+def _om_build_forecast_url(lat: float, lon: float, timezone_str: str, forecast_days: Optional[int] = None) -> str:
     """Build the Open-Meteo forecast URL with all required parameters."""
+    days = forecast_days or _forecast_days()
     params = {
         "latitude": lat,
         "longitude": lon,
         "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,relative_humidity_2m,cloud_cover,uv_index,visibility,pressure_msl",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,sunrise,sunset",
-        "hourly": "precipitation_probability,precipitation",
+        "hourly": "temperature_2m,apparent_temperature,weather_code,precipitation_probability,precipitation",
         "timezone": timezone_str,
-        "forecast_days": 4,
+        "forecast_days": days,
         "wind_speed_unit": "kmh",
         "precipitation_unit": "mm",
     }
@@ -415,57 +420,36 @@ def _fetch_om(geo: GeoResult) -> WeatherData:
             pressure_hPa=float(current_block.get("pressure_msl", 0)) or None,
         )
 
-    # ── Daily forecasts: today, tomorrow, day-after ──────────────────────────
+    # ── Daily forecast horizon ───────────────────────────────────────────────
     if daily_block:
         dates = daily_block.get("time", [])
-        wd.today = _om_daily_from_arrays(
-            0,
-            dates,
-            daily_block.get("temperature_2m_max", []),
-            daily_block.get("temperature_2m_min", []),
-            daily_block.get("weather_code", []),
-            daily_block.get("precipitation_probability_max", []),
-            daily_block.get("precipitation_sum", []),
-            daily_block.get("wind_speed_10m_max", []),
-            daily_block.get("wind_gusts_10m_max", []),
-            daily_block.get("uv_index_max", []),
-            daily_block.get("sunrise", []),
-            daily_block.get("sunset", []),
-        )
-        wd.tomorrow = _om_daily_from_arrays(
-            1,
-            dates,
-            daily_block.get("temperature_2m_max", []),
-            daily_block.get("temperature_2m_min", []),
-            daily_block.get("weather_code", []),
-            daily_block.get("precipitation_probability_max", []),
-            daily_block.get("precipitation_sum", []),
-            daily_block.get("wind_speed_10m_max", []),
-            daily_block.get("wind_gusts_10m_max", []),
-            daily_block.get("uv_index_max", []),
-            daily_block.get("sunrise", []),
-            daily_block.get("sunset", []),
-        )
-        wd.day_after = _om_daily_from_arrays(
-            2,
-            dates,
-            daily_block.get("temperature_2m_max", []),
-            daily_block.get("temperature_2m_min", []),
-            daily_block.get("weather_code", []),
-            daily_block.get("precipitation_probability_max", []),
-            daily_block.get("precipitation_sum", []),
-            daily_block.get("wind_speed_10m_max", []),
-            daily_block.get("wind_gusts_10m_max", []),
-            daily_block.get("uv_index_max", []),
-            daily_block.get("sunrise", []),
-            daily_block.get("sunset", []),
-        )
+        for idx in range(min(len(dates), _forecast_days())):
+            df = _om_daily_from_arrays(
+                idx,
+                dates,
+                daily_block.get("temperature_2m_max", []),
+                daily_block.get("temperature_2m_min", []),
+                daily_block.get("weather_code", []),
+                daily_block.get("precipitation_probability_max", []),
+                daily_block.get("precipitation_sum", []),
+                daily_block.get("wind_speed_10m_max", []),
+                daily_block.get("wind_gusts_10m_max", []),
+                daily_block.get("uv_index_max", []),
+                daily_block.get("sunrise", []),
+                daily_block.get("sunset", []),
+            )
+            if df is not None:
+                wd.daily_forecast.append(df)
+        wd.sync_legacy_daily_fields()
 
     # ── Hourly precipitation — future hours only ──────────────────────────────
     if hourly_block:
         times = hourly_block.get("time", [])
         probs = hourly_block.get("precipitation_probability", [])
         precips = hourly_block.get("precipitation", [])
+        temps = hourly_block.get("temperature_2m", [])
+        feels = hourly_block.get("apparent_temperature", [])
+        codes = hourly_block.get("weather_code", [])
         now = datetime.now(dt_tz.utc)
 
         for i, t_str in enumerate(times):
@@ -479,10 +463,19 @@ def _fetch_om(geo: GeoResult) -> WeatherData:
             if age_seconds > 30 * 60:
                 continue
 
+            probability = int(probs[i]) if i < len(probs) else 0
             wd.hourly_precipitation.append(HourlyPrecipitation(
                 time=t,
-                probability=int(probs[i]) if i < len(probs) else 0,
+                probability=probability,
                 mm=float(precips[i]) if i < len(precips) else 0,
+            ))
+            code = int(codes[i]) if i < len(codes) else 0
+            wd.hourly_forecast.append(HourlyForecast(
+                time=t,
+                temperature=float(temps[i]) if i < len(temps) else 0,
+                feels_like=float(feels[i]) if i < len(feels) else float(temps[i]) if i < len(temps) else 0,
+                condition=_om_parse_wmo_code(code),
+                precipitation_probability=probability,
             ))
 
     return wd

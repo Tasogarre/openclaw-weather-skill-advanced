@@ -25,6 +25,7 @@ from .weather_engine import (
     LocationNotFoundError,
     WeatherEngineError,
 )
+from .location_registry import list_registry_locations, delete_registry_location
 from .geocoding import geocode, geocode_with_fallback, GeoResult, GeocodingError
 from .weather_fetcher import fetch_forecast, WeatherFetchError
 from .advice_engine import (
@@ -56,6 +57,9 @@ __all__ = [
     "rain_in_window",
     "LocationNotFoundError",
     "WeatherEngineError",
+    # registry management
+    "list_registry_locations",
+    "delete_registry_location",
     # geocoding
     "geocode",
     "geocode_with_fallback",
