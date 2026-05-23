@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Optional
 
 from .weather_models import WeatherData, HourlyPrecipitation
-from .itinerary import resolve_itinerary_location
+from .itinerary import ItineraryEntry, resolve_itinerary_location
 
 
 @dataclass
@@ -368,3 +368,25 @@ def hourly_precip_by_hour(
         if window.start <= hp_time <= window.end:
             result[hp_time.hour] = max(result.get(hp_time.hour, 0), hp.probability)
     return result
+
+
+def resolve_itinerary_conflict(ctx: EvaluationContext, user_choice: str) -> EvaluationContext:
+    """Resolve an itinerary clarification context with the user's chosen location.
+
+    This helper is intentionally lightweight: callers can store the pending
+    EvaluationContext in ephemeral session memory, then rebuild/resolve it once
+    the user picks one of the conflicting location labels.
+    """
+    choice = (user_choice or "").strip().lower()
+    if not choice:
+        return ctx
+    for option in ctx.itinerary_conflicts:
+        if choice in option.lower() or option.lower() in choice:
+            ctx.primary_location = option
+            ctx.primary_display = option
+            ctx.location_source = "itinerary"
+            ctx.needs_clarification = False
+            ctx.clarification_prompt = None
+            ctx.itinerary_conflicts = []
+            return ctx
+    return ctx

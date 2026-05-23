@@ -39,7 +39,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -112,7 +112,7 @@ _INTENT_LLM_DEFAULT_CONFIG = {
 class WeatherIntent:
     location: str = "home"
     time_reference: str = "now"  # now | today | tomorrow | next-week | YYYY-MM-DD
-    intent_type: str = "general"  # general | precipitation | advice | commute | travel_weather
+    intent_type: str = "general"  # general | precipitation | advice | commute | travel_weather | itinerary
     is_commute: bool = False
     is_travel: bool = False
     destination: Optional[str] = None  # free-text destination when is_travel=True
@@ -130,6 +130,11 @@ class WeatherIntent:
     candidate_window_start: Optional[int] = None  # hour 0-23
     candidate_window_end: Optional[int] = None  # hour 0-23 (exclusive upper bound)
     raw_query: str = ""
+    # Itinerary management fields
+    itinerary_action: str = "none"  # none | add | remove | list
+    itinerary_start_date: Optional[str] = None  # YYYY-MM-DD
+    itinerary_end_date: Optional[str] = None  # YYYY-MM-DD
+    itinerary_label: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -164,6 +169,127 @@ _INTENT_PATTERNS = {
     "travel_weather": [r"\bfor a train\b", r"\bto catch a\b", r"\btrain to\b",
                        r"\bplatform\b.*\btomorrow\b", r"\bstation\b.*\btomorrow\b"],
 }
+
+
+# Itinerary management commands (private temporary-location context)
+_ITINERARY_ADD_PATTERNS = [
+    r"\b(?:add|create|set)\b.*\b(?:itinerary|trip|travel plan)\b",
+    r"\b(?:i am|i'm|ill|i'll|we are|we're)\s+(?:in|going to|staying in|visiting)\b",
+    r"\b(?:going to|staying in|visiting)\s+.+\s+\b(?:from|between)\b",
+]
+_ITINERARY_REMOVE_PATTERNS = [
+    r"\b(?:remove|delete|clear|cancel)\b.*\b(?:itinerary|trip|travel plan)\b",
+    r"\b(?:remove|delete|clear|cancel)\b.+\btrip\b",
+]
+_ITINERARY_LIST_PATTERNS = [
+    r"\b(?:list|show)\b.*\b(?:itinerary|trip|travel plan|upcoming travel)\b",
+    r"\b(?:what(?:'s| is)|show me)\b.*\b(?:my itinerary|my trips|upcoming travel)\b",
+]
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
+    "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+def _strip_ordinal_suffix(value: str) -> str:
+    return re.sub(r"(\d+)(?:st|nd|rd|th)\b", r"\1", value, flags=re.IGNORECASE)
+
+
+def _safe_date(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _extract_itinerary_dates(query: str, now: Optional[datetime] = None) -> tuple[Optional[str], Optional[str]]:
+    """Extract explicit inclusive date ranges for itinerary commands."""
+    base = now or datetime.now()
+    q = _strip_ordinal_suffix(query)
+    iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\s*(?:to|through|until|-|–|—)\s*(\d{4}-\d{2}-\d{2})\b", q, flags=re.IGNORECASE)
+    if iso:
+        try:
+            start = datetime.fromisoformat(iso.group(1)).date()
+            end = datetime.fromisoformat(iso.group(2)).date()
+        except ValueError:
+            return None, None
+        if end < start:
+            start, end = end, start
+        return start.isoformat(), end.isoformat()
+    month_re = "|".join(sorted(_MONTHS, key=len, reverse=True))
+    same_month = re.search(rf"\b({month_re})\s+(\d{{1,2}})\s*(?:to|through|until|-|–|—)\s*(\d{{1,2}})\b", q, flags=re.IGNORECASE)
+    if same_month:
+        month = _MONTHS[same_month.group(1).lower()]
+        start = _safe_date(base.year, month, int(same_month.group(2)))
+        end = _safe_date(base.year, month, int(same_month.group(3)))
+        if start and end:
+            if end < start:
+                end = _safe_date(base.year + 1, month, int(same_month.group(3))) or end
+            return start.isoformat(), end.isoformat()
+    two_months = re.search(rf"\b({month_re})\s+(\d{{1,2}})\s*(?:to|through|until|-|–|—)\s*({month_re})\s+(\d{{1,2}})\b", q, flags=re.IGNORECASE)
+    if two_months:
+        start = _safe_date(base.year, _MONTHS[two_months.group(1).lower()], int(two_months.group(2)))
+        end = _safe_date(base.year, _MONTHS[two_months.group(3).lower()], int(two_months.group(4)))
+        if start and end:
+            if end < start:
+                end = _safe_date(base.year + 1, end.month, end.day) or end
+            return start.isoformat(), end.isoformat()
+    return None, None
+
+
+def _extract_itinerary_location(query: str) -> Optional[str]:
+    patterns = [
+        r"\b(?:i am|i'm|ill|i'll|we are|we're)\s+(?:in|going to|staying in|visiting)\s+(.+?)(?=\s+from\b|\s+between\b|\s+on\b|\s+\d{4}-\d{2}-\d{2}\b|[?.!,;:]|$)",
+        r"\b(?:going to|staying in|visiting)\s+(.+?)(?=\s+from\b|\s+between\b|\s+on\b|\s+\d{4}-\d{2}-\d{2}\b|[?.!,;:]|$)",
+        r"\b(?:add|create|set)\b.*\b(?:itinerary|trip|travel plan)\b.*\b(?:for|to|in)\s+(.+?)(?=\s+from\b|\s+between\b|\s+on\b|\s+\d{4}-\d{2}-\d{2}\b|[?.!,;:]|$)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, flags=re.IGNORECASE)
+        if m:
+            cleaned = _clean_extracted_place(_strip_time_suffix(m.group(1)))
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _extract_itinerary_remove_target(query: str) -> Optional[str]:
+    patterns = [
+        r"\b(?:remove|delete|clear|cancel)\s+(.+?)\s+(?:trip|itinerary|travel plan)\b",
+        r"\b(?:remove|delete|clear|cancel)\s+(?:trip|itinerary|travel plan)\s+(?:for|to|in)?\s*(.+?)(?:[?.!,;:]|$)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, flags=re.IGNORECASE)
+        if m:
+            cleaned = _clean_extracted_place(m.group(1))
+            if cleaned and cleaned.lower() not in {"my", "the", "a"}:
+                return cleaned
+    return None
+
+
+def _classify_itinerary_intent(query: str) -> Optional[WeatherIntent]:
+    q = query.lower()
+    if any(re.search(p, q) for p in _ITINERARY_LIST_PATTERNS):
+        return WeatherIntent(location="home", time_reference="today", intent_type="itinerary", raw_query=query, itinerary_action="list")
+    if any(re.search(p, q) for p in _ITINERARY_REMOVE_PATTERNS):
+        target = _extract_itinerary_remove_target(query)
+        return WeatherIntent(location=target or "home", time_reference="today", intent_type="itinerary", raw_query=query, itinerary_action="remove", destination=target, itinerary_label=target)
+    if any(re.search(p, q) for p in _ITINERARY_ADD_PATTERNS):
+        start, end = _extract_itinerary_dates(query)
+        destination = _extract_itinerary_location(query)
+        return WeatherIntent(
+            location=destination or "home",
+            time_reference=start or "today",
+            intent_type="itinerary",
+            is_travel=bool(destination),
+            destination=destination,
+            raw_query=query,
+            itinerary_action="add",
+            itinerary_start_date=start,
+            itinerary_end_date=end,
+            itinerary_label=destination,
+        )
+    return None
 
 # Travel-related location keywords — detected as travel when combined with non-commute patterns
 _TRAVEL_KEYWORDS = [
@@ -644,7 +770,7 @@ Output format:
 {
   "location": "<registry_alias or free-text location>",
   "time_reference": "<now|today|tomorrow|next-week|YYYY-MM-DD>",
-  "intent_type": "<general|precipitation|advice|commute|travel_weather>",
+  "intent_type": "<general|precipitation|advice|commute|travel_weather|itinerary>",
   "is_commute": <true|false>,
   "is_travel": <true|false>,
   "destination": "<destination or null>",
@@ -734,6 +860,10 @@ def _parse_intent_response(response: str) -> Optional[WeatherIntent]:
             travel_window_end=data.get("travel_window_end"),
             travel_window_label=data.get("travel_window_label"),
             needs_time_clarify=bool(data.get("needs_time_clarify", False)),
+            itinerary_action=data.get("itinerary_action", "none"),
+            itinerary_start_date=data.get("itinerary_start_date"),
+            itinerary_end_date=data.get("itinerary_end_date"),
+            itinerary_label=data.get("itinerary_label"),
         )
     except (json.JSONDecodeError, KeyError) as e:
         logger.debug(f"Intent parse failed: {e}")
@@ -968,6 +1098,11 @@ def classify_intent(query: str) -> WeatherIntent:
     through OmniRoute (http://127.0.0.1:20128) unless a custom endpoint is explicitly
     configured in intent_llm.local.json.
     """
+    # Itinerary management is privacy/stateful; keep it deterministic and local.
+    itinerary_intent = _classify_itinerary_intent(query)
+    if itinerary_intent:
+        return itinerary_intent
+
     # Strip common prefixes
     clean_query = re.sub(r"^(weather|what's the weather|forecast)\s*", "", query.lower())
     clean_query = clean_query.strip("?.,!")

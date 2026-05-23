@@ -9,13 +9,14 @@ real travel plans are private runtime data and should never be committed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import json
 import os
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_ITINERARY_PATH = Path(__file__).parent / "itinerary.json"
+DEFAULT_ITINERARY_PATH = Path.home() / ".config" / "openclaw" / "weather" / "itinerary.json"
+LEGACY_WORKSPACE_ITINERARY_PATH = Path(__file__).parent / "itinerary.json"
 EXAMPLE_ITINERARY_PATH = Path(__file__).parent / "itinerary.example.json"
 ITINERARY_PATH_ENV = "WEATHER_ITINERARY_PATH"
 
@@ -185,3 +186,79 @@ def active_entry_for_date(target_date: date, path: Optional[Path] = None) -> Opt
     if not resolution or resolution.has_conflict:
         return None
     return resolution.entry
+
+
+def entry_to_dict(entry: ItineraryEntry) -> dict[str, Any]:
+    """Serialize an itinerary entry to JSON-compatible form."""
+    return {
+        "label": entry.label,
+        "location": entry.location,
+        "start": entry.start.isoformat(),
+        "end": entry.end.isoformat(),
+        "timezone": entry.timezone,
+        "priority": entry.priority,
+        "updated_at": entry.updated_at,
+        "source": entry.source,
+    }
+
+
+def quick_add_itinerary(
+    location: str,
+    start: str | date,
+    end: str | date,
+    label: Optional[str] = None,
+    *,
+    priority: int = 0,
+    timezone_name: Optional[str] = None,
+    path: Optional[Path] = None,
+) -> ItineraryEntry:
+    """Append a user itinerary entry and save it to the private itinerary file."""
+    start_date = _coerce_date(start)
+    end_date = _coerce_date(end)
+    if start_date is None or end_date is None:
+        raise ValueError("Itinerary start/end must be ISO dates or date objects")
+    if end_date < start_date:
+        raise ValueError("Itinerary end date cannot be before start date")
+    clean_location = str(location or "").strip()
+    if not clean_location:
+        raise ValueError("Itinerary location is required")
+    entry = ItineraryEntry(
+        label=str(label or clean_location).strip(),
+        location=clean_location,
+        start=start_date,
+        end=end_date,
+        timezone=timezone_name,
+        priority=int(priority or 0),
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        source="user",
+    )
+    data = load_itinerary(path)
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    entries.append(entry_to_dict(entry))
+    data["entries"] = entries
+    data.setdefault("version", "1.0.0")
+    save_itinerary(data, path)
+    return entry
+
+
+def remove_itinerary_entries(target: str, path: Optional[Path] = None) -> list[ItineraryEntry]:
+    """Remove entries whose label/location contains target (case-insensitive)."""
+    needle = str(target or "").strip().lower()
+    if not needle:
+        return []
+    data = load_itinerary(path)
+    kept: list[dict[str, Any]] = []
+    removed: list[ItineraryEntry] = []
+    for raw in data.get("entries", []):
+        entry = _coerce_entry(raw)
+        haystack = f"{getattr(entry, 'label', '')} {getattr(entry, 'location', '')}".lower() if entry else ""
+        if entry and needle in haystack:
+            removed.append(entry)
+        else:
+            kept.append(raw)
+    if removed:
+        data["entries"] = kept
+        save_itinerary(data, path)
+    return removed

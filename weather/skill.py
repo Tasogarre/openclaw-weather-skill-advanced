@@ -56,12 +56,64 @@ from .evaluation_context import (
     hourly_precip_by_hour,
     EvaluationContext,
 )
+from .itinerary import quick_add_itinerary, remove_itinerary_entries, list_entries
 from .formatters.chat_formatter import format_chat, format_forecast_range
 from .formatters.briefing_formatter import format_briefing
 from .weather_models import WeatherData
 
 
 # ── Chat interface ───────────────────────────────────────────────
+
+
+def handle_itinerary_command(intent: WeatherIntent) -> str:
+    """Handle add/remove/list commands for private temporary travel context."""
+    action = getattr(intent, "itinerary_action", "none")
+    if action == "add":
+        return _itinerary_add(intent)
+    if action == "remove":
+        return _itinerary_remove(intent)
+    if action == "list":
+        return _itinerary_list(intent)
+    return "🧳 I can add, remove, or list itinerary entries. Try: ‘I’m in Santiago from June 1-5’."
+
+
+def _itinerary_add(intent: WeatherIntent) -> str:
+    location = intent.destination or (intent.location if intent.location != "home" else None)
+    start = getattr(intent, "itinerary_start_date", None)
+    end = getattr(intent, "itinerary_end_date", None)
+    if not location:
+        return "🧳 Where should I add to your itinerary? Example: ‘I’m in Santiago from June 1-5’."
+    if not start or not end:
+        return "📅 What dates should I use? For now, use explicit dates like ‘June 1-5’ or ‘2026-06-01 to 2026-06-05’."
+    try:
+        entry = quick_add_itinerary(location=location, start=start, end=end, label=getattr(intent, "itinerary_label", None) or location)
+    except Exception as e:
+        return f"⚠️ I couldn’t save that itinerary entry: {e}"
+    return f"🧳 Added travel context: {entry.location} ({entry.start:%b %d}–{entry.end:%b %d}). I’ll use it for weather queries during those dates."
+
+
+def _itinerary_remove(intent: WeatherIntent) -> str:
+    target = intent.destination or getattr(intent, "itinerary_label", None) or (intent.location if intent.location != "home" else None)
+    if not target:
+        return "🧳 Which trip should I remove? Example: ‘Remove Santiago trip’."
+    removed = remove_itinerary_entries(target)
+    if not removed:
+        return f"🧳 I couldn’t find an itinerary entry matching ‘{target}’."
+    labels = ", ".join(f"{entry.location} ({entry.start:%b %d}–{entry.end:%b %d})" for entry in removed)
+    return f"🧳 Removed travel context: {labels}."
+
+
+def _itinerary_list(intent: WeatherIntent) -> str:
+    entries = sorted(list_entries(), key=lambda e: (e.start, e.end, e.label))
+    if not entries:
+        return "🧳 No upcoming itinerary entries saved."
+    lines = ["🧳 **Saved travel context**"]
+    today = datetime.now().date()
+    for entry in entries:
+        status = "active" if entry.start <= today <= entry.end else "upcoming" if today < entry.start else "past"
+        lines.append(f"• {entry.location} — {entry.start:%Y-%m-%d} to {entry.end:%Y-%m-%d} ({status})")
+    return "\n".join(lines)
+
 
 def get_weather_chat(query: str, departure_time: Optional[str] = None) -> str:
     """
@@ -81,7 +133,11 @@ def get_weather_chat(query: str, departure_time: Optional[str] = None) -> str:
         # Step 1: classify intent
         intent = classify_intent(query)
 
-        # Step 2: build evaluation context (central date/time/location layer)
+        # Step 2: handle private itinerary management before weather fetching.
+        if intent.intent_type == "itinerary":
+            return handle_itinerary_command(intent)
+
+        # Step 3: build evaluation context (central date/time/location layer)
         ctx = build_evaluation_context(intent)
 
         # Step 3: handle travel queries with inline time clarification

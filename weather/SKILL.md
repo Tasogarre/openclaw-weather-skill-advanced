@@ -506,3 +506,21 @@ OpenWeatherMap failures fall back to Open-Meteo where possible. A hard error is 
 ## Personal context shorthand
 
 - `WFH`, `working from home`, and `work from home` resolve weather context to the configured `home` location.
+
+
+## Private itinerary / travel context
+
+The weather skill can store temporary date-range travel context in a private JSON file so plain questions like “What’s the weather today?” use your current trip location during active dates.
+
+Examples:
+
+- `I’m in Santiago from June 1-5` — add travel context
+- `What’s my itinerary?` — list saved travel context
+- `Remove Santiago trip` — remove matching entries
+
+Privacy notes:
+
+- Live itinerary data is written to `~/.config/openclaw/weather/itinerary.json` by default.
+- Set `WEATHER_ITINERARY_PATH` to use a different private path.
+- The committed `itinerary.example.json` is write-protected and must not contain private travel plans.
+- Scheduled briefings should call `get_weather_briefing_for_today()` to pick up active itinerary context with an explicit travel-context note.
